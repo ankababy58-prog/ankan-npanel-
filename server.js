@@ -10,7 +10,7 @@ app.use(bodyParser.json());
 
 // Her yeni dosya teslim edildiğinde bu tarihi değiştiriyoruz. Sitenin en altında küçük yazıyla görünür -
 // Render'a yüklediğin sürümün gerçekten güncellenip güncellenmediğini buradan kontrol edebilirsin.
-const APP_VERSION = '2026-11-01-16';
+const APP_VERSION = '2026-11-04-17';
 
 // ====== AYARLAR (Render > Environment bölümünden de girilebilir) ======
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8989904538:AAGETyb0e5ghitsYM3yWInhnIi3lexYMjPw';
@@ -1571,13 +1571,15 @@ app.get('/', (req, res) => {
                 var data = await res.json();
                 var el = document.getElementById('userBalance');
                 if (data.success && el) el.innerText = data.balance.toFixed(2) + ' TL';
+                var hb = document.getElementById('homeBalance');
+                if (data.success && hb) hb.innerText = data.balance.toFixed(2) + ' TL';
             }
 
             function buildMain() {
                 document.getElementById('mainContent').innerHTML =
                     '<div id="navTabs" class="flex gap-1 mb-6" style="border-bottom:1px solid var(--border)">' +
-                    '<button onclick="switchPanel(\'home\')" id="navHomeBtn" class="tabBtn active px-4 py-2.5 text-sm font-semibold">Ana Sayfa</button>' +
-                    '<button onclick="switchPanel(\'orders\')" id="navOrdersBtn" class="tabBtn px-4 py-2.5 text-sm font-semibold">Siparişlerim</button>' +
+                    '<button onclick="switchPanel(\\'home\\')" id="navHomeBtn" class="tabBtn active px-4 py-2.5 text-sm font-semibold">Ana Sayfa</button>' +
+                    '<button onclick="switchPanel(\\'orders\\')" id="navOrdersBtn" class="tabBtn px-4 py-2.5 text-sm font-semibold">Siparişlerim</button>' +
                     '</div>' +
                     '<div id="homePanel">' +
                     '<div class="glassCard rounded-2xl p-5 mb-7 flex items-center justify-between flex-wrap gap-4">' +
@@ -1606,12 +1608,12 @@ app.get('/', (req, res) => {
                     '<div id="smmSection" class="mt-8"></div>' +
                     '<div id="manualSection" class="mt-8"></div>' +
                     '<div class="mt-10">' +
-                    '<div class="flex items-center justify-between mb-3"><h3 class="font-bold text-lg">Son Siparişler</h3><button onclick="switchPanel(\'orders\')" class="text-xs font-semibold" style="color:var(--accent)">Tümünü gör</button></div>' +
+                    '<div class="flex items-center justify-between mb-3"><h3 class="font-bold text-lg">Son Siparişler</h3><button onclick="switchPanel(\\'orders\\')" class="text-xs font-semibold" style="color:var(--accent)">Tümünü gör</button></div>' +
                     '<div id="recentOrdersArea"><p class="text-slate-400 text-sm">Yükleniyor...</p></div>' +
                     '</div>' +
                     '<div class="mt-10 mb-4 glassCard rounded-2xl p-5 flex items-center justify-between flex-wrap gap-4">' +
                     '<div class="flex items-center gap-3"><div class="prodIcon w-11 h-11 rounded-xl flex items-center justify-center text-lg shrink-0"><i class="fa-brands fa-whatsapp"></i></div><div><h3 class="font-bold text-sm">Yardıma mı ihtiyacınız var?</h3><p class="text-xs text-slate-400">Sorularınız için WhatsApp üzerinden bize ulaşın.</p></div></div>' +
-                    '<a href="https://wa.me/573181006792" target="_blank" class="bg-black/40 border border-violet-500/20 px-5 py-2.5 rounded-xl text-sm font-semibold">WhatsApp\'tan Yaz</a>' +
+                    '<a href="https://wa.me/573181006792" target="_blank" class="bg-black/40 border border-violet-500/20 px-5 py-2.5 rounded-xl text-sm font-semibold">WhatsApp\\'tan Yaz</a>' +
                     '</div>' +
                     '</div>' +
                     '<div id="ordersPanel" style="display:none"></div>';
@@ -1795,16 +1797,17 @@ app.get('/', (req, res) => {
                         grid.innerHTML = '<p class="text-slate-400 text-sm">Şu an ürün yüklenemedi.</p>';
                         return;
                     }
-                    var featured = data.services.filter(function (s) { return s.featured; });
-                    var rest = data.services.filter(function (s) { return !s.featured; });
+                    allServicesData = data.services;
+                    var featured = allServicesData.filter(function (s) { return s.featured; });
                     var fWrap = document.getElementById('featuredWrap');
                     var fGrid = document.getElementById('featuredGrid');
                     if (featured.length && fWrap && fGrid) {
                         fWrap.style.display = 'block';
                         fGrid.innerHTML = featured.map(function (s) { return renderServiceCard(s, true); }).join('');
                     } else if (fWrap) { fWrap.style.display = 'none'; }
-                    grid.innerHTML = rest.map(function (s) { return renderServiceCard(s, false); }).join('');
-                } catch (e) {}
+                    buildFilterChips();
+                    renderFilteredServices();
+                } catch (e) { grid.innerHTML = '<p class="text-slate-400 text-sm">Ürünler yüklenirken hata oluştu.</p>'; }
             }
 
             function renderServiceCard(s, isFeatured) {
