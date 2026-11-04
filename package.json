@@ -1,0 +1,17 @@
+{
+  "name": "anka-sms",
+  "version": "1.0.0",
+  "description": "Anka SMS - sanal numara satış paneli",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "body-parser": "^1.20.2",
+    "express": "^4.18.2"
+  }
+}
