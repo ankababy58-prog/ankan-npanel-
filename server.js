@@ -13,11 +13,23 @@ app.use(bodyParser.json());
 const APP_VERSION = '2026-11-05-19';
 
 // ====== AYARLAR (Render > Environment bölümünden de girilebilir) ======
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9264065416:AAEf6HlYGJSJLWtAalLhA8C82w2-vyIrzsY';
-const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '9264065416:AAEf6HlYGJSJLWtAalLhA8C82w2-vyIrzsY';
-const ADMIN_TELEGRAM_USERNAME = process.env.ADMIN_TELEGRAM_USERNAME || 'sonpatronn'; // destek için görünen iletişim kanalı
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9264065416:AAHZqKF6BhGS9cPRiigEfJSHp3bOC8j01kw';
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '8811977430';
+// 2026-11-06: admin isteğiyle ikinci bir Telegram hesabı (kişisel hesap) da bildirimlere eklendi - ödeme
+// bildirimi hem eski ADMIN_CHAT_ID'ye hem buraya gider, onay/red butonları HER İKİSİNDEN de kullanılabilir.
+const ADMIN_CHAT_ID_2 = process.env.ADMIN_CHAT_ID_2 || '8935662812';
+const ADMIN_CHAT_IDS = Array.from(new Set([ADMIN_CHAT_ID, ADMIN_CHAT_ID_2].filter(Boolean)));
+// Admin'e Telegram bildirimi gönderir - ADMIN_CHAT_IDS listesindeki TÜM sohbetlere aynı anda yollar.
+async function notifyAdminTelegram(text, extra) {
+    for (const chatId of ADMIN_CHAT_IDS) {
+        try {
+            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, Object.assign({ chat_id: chatId, text }, extra || {}));
+        } catch (e) { console.error('[notifyAdminTelegram] hata (chat ' + chatId + '):', e.message); }
+    }
+}
+const ADMIN_TELEGRAM_USERNAME = process.env.ADMIN_TELEGRAM_USERNAME || 'vipankaa'; // destek için görünen iletişim kanalı
 const ADMIN_WHATSAPP = process.env.ADMIN_WHATSAPP || '573181006792'; // wa.me linki için ülke koduyla, başında + ve boşluk olmadan
-const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || 'https://ankan-npanel.onrender.com';
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || 'https://g-venlipanelsms.onrender.com';
 // ====== SAĞLAYICI: sms.tc (SMS-Activate uyumlu uç nokta) ======
 // sms.tc'nin kendi dokümantasyonu doğrulandı: /stubs/handler_api.php, OnaylaSMS ile BİREBİR aynı
 // SMS-Activate protokolünü konuşuyor (ACCESS_NUMBER:id:phone, STATUS_OK:code, NO_NUMBERS, NO_BALANCE,
@@ -185,6 +197,31 @@ function persist() {
     }, 400);
 }
 
+// ====== VERİTABANI YEDEĞİ TELEGRAM'A GÖNDER (Render ücretsiz plan kalıcı disk desteklemediği için) ======
+// Render'ın ücretsiz planında disk kalıcı DEĞİL - gerçek bir "yeniden deploy" diski sıfırlayabilir, bu da
+// kayıtlı kullanıcıları/bakiyeleri silebilir. Bunun KESİN çözümü ya Render'da ücretli bir plana geçip
+// "Persistent Disk" eklemek, ya da harici bir veritabanı kullanmaktır - ikisi de admin'in kararı.
+// Bu fonksiyon ise ANINDA bir güvenlik ağı sağlıyor: veritabanının güncel halini düzenli olarak admin'in
+// Telegram'ına bir dosya (.json) olarak gönderir. Bir silinme olursa, admin o dosyayı bota GERİ YÜKLER
+// (bkz. webhook'taki "document" işleyicisi) ve kullanıcılar/bakiyeler/siparişler geri gelir.
+async function sendDbBackupToAdmin(reason) {
+    try {
+        const json = JSON.stringify(db);
+        const userCount = Object.keys(db.users || {}).length;
+        const orderCount = Object.keys(db.orders || {}).length;
+        const caption = `🗄️ Anka veritabanı yedeği (${reason})\n${userCount} kullanıcı, ${orderCount} sipariş\n${new Date().toLocaleString('tr-TR')}\n\nBu dosyayı bota tekrar GÖNDERİRSEN (belge olarak), veritabanı bu yedekteki haline geri döner.`;
+        for (const chatId of ADMIN_CHAT_IDS) {
+            try {
+                const form = new FormData();
+                form.append('chat_id', chatId);
+                form.append('caption', caption);
+                form.append('document', new Blob([json], { type: 'application/json' }), 'anka_yedek.json');
+                await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, form, { timeout: 20000 });
+            } catch (e) { console.error('[sendDbBackupToAdmin] gönderim hatası (chat ' + chatId + '):', e.message); }
+        }
+    } catch (e) { console.error('[sendDbBackupToAdmin] hata:', e.message); }
+}
+
 let supportMsgMap = {}; // telegram mesaj id -> username (adminin hangi mesaja cevap verdiğini eşlemek için)
 
 // Ziyaretçinin nereden geldiğini (hangi platform) tahmin eder: önce ?src= / ?utm_source= parametresi,
@@ -254,42 +291,47 @@ function checkAdminToken(token) {
 // (isimle bulunamazsa denenecek, yaygın bilinen kod tahminleri) var. Gerçek kod ilk satışta otomatik
 // keşfedilip önbelleğe alınır (resolveServiceCode). Admin panelden de elle düzeltilebilir.
 // ====== KATALOG (2026-11-01'de tamamen yenilendi - eski tüm ürünler silindi, sadece aşağıdakiler satılıyor) ======
-// Fiyatlar admin'in verdiği TL değerleri; dynamicPricing:true olanlar sms.tc canlı maliyetine göre arka planda
-// (refreshDynamicCatalogPrices) güncellenir ama asla bu başlangıç fiyatının ALTINA düşmez (bkz. computeOtherPrice).
+// Fiyatlar admin'in verdiği TL değerleri. İKİ fiyatlama modu var:
+//   1) dynamicPricing yok -> SABİT fiyat, sistem asla dokunmaz, admin ne yazdıysa panelde o kalır.
+//   2) dynamicPricing:true + flatMargin:<TL> -> fiyat = (sağlayıcı canlı maliyeti TL'ye çevrilmiş) + flatMargin,
+//      her 10 dakikada bir arka planda tazelenir (refreshDynamicCatalogPrices/computeFlatMarginPrice).
+// 2026-11-06: admin "fiyatları değiştirmişsin, sabit fiyat istiyorum" dedi - verdiği TL değerlerinin TAMAMI
+// artık SABİTLENDİ (dynamicPricing kaldırıldı). Admin'in TL değeri belirtmediği "diğer" ürünler
+// flatMargin:150 ile (canlı maliyet + 150 TL) otomatik fiyatlanmaya devam ediyor.
 const CATALOG = [
-    { id: 'tg_tr', key: 'tr', name: 'Telegram Türkiye', serviceCode: 'tg', defCountry: '62', price: 250, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400', featured: true, dynamicPricing: true },
-    { id: 'tg_co', key: 'co', name: 'Telegram Kolombiya', serviceCode: 'tg', defCountry: '10', price: 200, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400', dynamicPricing: true },
-    { id: 'tg_us', key: 'us', name: 'Telegram Amerika', serviceCode: 'tg', defCountry: '187', alt: ['12'], price: 200, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400', dynamicPricing: true },
-    { id: 'tg_gb', key: 'gb', name: 'Telegram İngiltere', serviceCode: 'tg', defCountry: '16', price: 250, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400', dynamicPricing: true },
-    { id: 'wa_tr', key: 'tr', name: 'WhatsApp Türkiye', serviceCode: 'wa', defCountry: '62', price: 300, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400', featured: true, dynamicPricing: true },
-    { id: 'wa_us', key: 'us', name: 'WhatsApp Amerika', serviceCode: 'wa', defCountry: '187', alt: ['12'], price: 200, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400', dynamicPricing: true },
-    { id: 'wa_gb', key: 'gb', name: 'WhatsApp İngiltere', serviceCode: 'wa', defCountry: '16', price: 250, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400', dynamicPricing: true },
-    { id: 'wa_sg', key: 'sg', name: 'WhatsApp Singapur', serviceCode: 'wa', defCountry: '52', price: 250, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400', dynamicPricing: true },
+    { id: 'tg_tr', key: 'tr', name: 'Telegram Türkiye', serviceCode: 'tg', defCountry: '62', price: 250, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400', featured: true },
+    { id: 'tg_co', key: 'co', name: 'Telegram Kolombiya', serviceCode: 'tg', defCountry: '10', price: 150, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400' },
+    { id: 'tg_us', key: 'us', name: 'Telegram Amerika', serviceCode: 'tg', defCountry: '187', alt: ['12'], price: 200, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400' },
+    { id: 'tg_gb', key: 'gb', name: 'Telegram İngiltere', serviceCode: 'tg', defCountry: '16', price: 200, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400' },
+    { id: 'wa_tr', key: 'tr', name: 'WhatsApp Türkiye', serviceCode: 'wa', defCountry: '62', price: 300, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400', featured: true, dynamicPricing: true, flatMargin: 150 },
+    { id: 'wa_us', key: 'us', name: 'WhatsApp Amerika', serviceCode: 'wa', defCountry: '187', alt: ['12'], price: 250, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400' },
+    { id: 'wa_gb', key: 'gb', name: 'WhatsApp İngiltere', serviceCode: 'wa', defCountry: '16', price: 250, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400' },
+    { id: 'wa_sg', key: 'sg', name: 'WhatsApp Singapur', serviceCode: 'wa', defCountry: '52', price: 200, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400' },
     // "Anonim/Rastgele" ürünler: tek bir sabit ülkeye bağlı değil - sistem o anki en GÜVENİLİR (stoklu) VE en UCUZ
     // ülkeyi otomatik seçer (randomPool + countryCandidates'deki ucuz-önce sıralaması sayesinde). Müşteri belirli bir
     // ülkede numara alamazsa (sms gelmiyor/stok yok) bu ürünü deneyerek garanti bir numara alabilir.
-    { id: 'wa_anonim', randomPool: ['co', 'us', 'gb', 'sg', 'ph'], name: 'WhatsApp Anonim (Rastgele Ülke)', serviceCode: 'wa', defCountry: '10', price: 300, icon: 'fa-shuffle', iconSet: 'fa-solid', bg: 'bg-violet-500/10', color: 'text-violet-400', featured: true, dynamicPricing: true },
-    { id: 'tg_anonim', randomPool: ['co', 'us', 'gb', 'ph'], name: 'Telegram Anonim (Rastgele Ülke)', serviceCode: 'tg', defCountry: '10', price: 300, icon: 'fa-shuffle', iconSet: 'fa-solid', bg: 'bg-blue-500/10', color: 'text-blue-400', featured: true, dynamicPricing: true },
-    { id: 'pazarama_tr', key: 'tr', name: 'Pazarama Türkiye', defCountry: '62', price: 300, serviceHints: ['pazarama'], guessCodes: [], icon: 'fa-store', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true },
-    { id: 'sahibinden_tr', key: 'tr', name: 'Sahibinden Türkiye', defCountry: '62', price: 200, serviceHints: ['sahibinden'], guessCodes: [], icon: 'fa-shop', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true },
-    { id: 'dolap_tr', key: 'tr', name: 'Dolap Türkiye', defCountry: '62', price: 350, serviceHints: ['dolap'], guessCodes: [], icon: 'fa-shirt', iconSet: 'fa-solid', bg: 'bg-pink-500/10', color: 'text-pink-400', dynamicPricing: true },
-    // NOT: Letgo için admin fiyat belirtmedi - 250 TL geçici/varsayılan fiyat olarak ayarlandı, admin panelden değiştirilebilir.
-    { id: 'letgo_tr', key: 'tr', name: 'Letgo Türkiye', defCountry: '62', price: 250, serviceHints: ['letgo'], guessCodes: [], icon: 'fa-tag', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-300', dynamicPricing: true },
-    { id: 'uber_tr', key: 'tr', name: 'Uber Türkiye', defCountry: '62', price: 200, serviceHints: ['uber'], guessCodes: ['ub'], icon: 'fa-uber', iconSet: 'fa-brands', bg: 'bg-slate-500/10', color: 'text-slate-200', dynamicPricing: true },
-    { id: 'paycell_tr', key: 'tr', name: 'Paycell Türkiye', defCountry: '62', price: 250, serviceHints: ['paycell'], guessCodes: [], icon: 'fa-credit-card', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true },
-    { id: 'trendyolgo_tr', key: 'tr', name: 'Trendyol Go', defCountry: '62', price: 250, serviceHints: ['trendyol go', 'trendyolgo'], guessCodes: [], icon: 'fa-motorcycle', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-400', dynamicPricing: true },
-    { id: 'paypal_tr', key: 'tr', name: 'PayPal Türkiye', defCountry: '62', price: 250, serviceHints: ['paypal'], guessCodes: ['mt', 'pp'], icon: 'fa-paypal', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-300', dynamicPricing: true },
-    { id: 'trendyol_tr', key: 'tr', name: 'Trendyol', defCountry: '62', price: 200, serviceHints: ['trendyol'], guessCodes: [], icon: 'fa-bag-shopping', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-400', dynamicPricing: true },
-    { id: 'ds_tr', key: 'tr', name: 'Discord Türkiye', defCountry: '62', price: 100, serviceHints: ['discord'], guessCodes: ['ds', 'dc'], icon: 'fa-discord', iconSet: 'fa-brands', bg: 'bg-indigo-500/10', color: 'text-indigo-400', dynamicPricing: true },
-    { id: 'ap_tr', key: 'tr', name: 'Apple Türkiye', defCountry: '62', price: 200, serviceHints: ['apple', 'icloud'], guessCodes: ['mz', 'ap'], icon: 'fa-apple', iconSet: 'fa-brands', bg: 'bg-slate-500/10', color: 'text-slate-300', dynamicPricing: true },
-    // 2026-11-05: admin isteğiyle eklendi (sms.tc üzerinden)
-    { id: 'hopi_tr', key: 'tr', name: 'Hopi Türkiye', defCountry: '62', price: 200, serviceHints: ['hopi'], guessCodes: [], icon: 'fa-gift', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true },
-    { id: 'yemeksepeti_tr', key: 'tr', name: 'Yemeksepeti Türkiye', defCountry: '62', price: 300, serviceHints: ['yemeksepeti'], guessCodes: [], icon: 'fa-utensils', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-400', dynamicPricing: true },
-    { id: 'hepsiburada_tr', key: 'tr', name: 'Hepsi Burada Türkiye', defCountry: '62', price: 250, serviceHints: ['hepsiburada', 'hepsi burada'], guessCodes: [], icon: 'fa-cart-shopping', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-400', dynamicPricing: true },
-    { id: 'steam_tr', key: 'tr', name: 'Steam Türkiye', defCountry: '62', price: 200, serviceHints: ['steam'], guessCodes: ['st', 'su'], icon: 'fa-steam', iconSet: 'fa-brands', bg: 'bg-slate-500/10', color: 'text-slate-300', dynamicPricing: true },
-    { id: 'oyuneks_tr', key: 'tr', name: 'Oyuneks Türkiye', defCountry: '62', price: 200, serviceHints: ['oyuneks'], guessCodes: [], icon: 'fa-gamepad', iconSet: 'fa-solid', bg: 'bg-purple-500/10', color: 'text-purple-400', dynamicPricing: true },
-    { id: 'ms_tr', key: 'tr', name: 'Microsoft Türkiye', defCountry: '62', price: 150, serviceHints: ['microsoft', 'outlook', 'hotmail'], guessCodes: ['mm', 'ms'], icon: 'fa-microsoft', iconSet: 'fa-brands', bg: 'bg-sky-500/10', color: 'text-sky-400', dynamicPricing: true },
-    { id: 'google_tr', key: 'tr', name: 'Google / Gmail / Youtube Türkiye', defCountry: '62', price: 200, serviceHints: ['google', 'gmail', 'youtube'], guessCodes: ['go', 'ya'], icon: 'fa-google', iconSet: 'fa-brands', bg: 'bg-red-500/10', color: 'text-red-400', dynamicPricing: true }
+    // Admin bunlara özel bir TL değeri vermedi -> "diğerleri" kuralı (maliyet + 150 TL) uygulanıyor.
+    { id: 'wa_anonim', randomPool: ['co', 'us', 'gb', 'sg', 'ph'], name: 'WhatsApp Anonim (Rastgele Ülke)', serviceCode: 'wa', defCountry: '10', price: 300, icon: 'fa-shuffle', iconSet: 'fa-solid', bg: 'bg-violet-500/10', color: 'text-violet-400', featured: true, dynamicPricing: true, flatMargin: 150 },
+    { id: 'tg_anonim', randomPool: ['co', 'us', 'gb', 'ph'], name: 'Telegram Anonim (Rastgele Ülke)', serviceCode: 'tg', defCountry: '10', price: 300, icon: 'fa-shuffle', iconSet: 'fa-solid', bg: 'bg-blue-500/10', color: 'text-blue-400', featured: true, dynamicPricing: true, flatMargin: 150 },
+    { id: 'pazarama_tr', key: 'tr', name: 'Pazarama Türkiye', defCountry: '62', price: 300, serviceHints: ['pazarama'], guessCodes: [], icon: 'fa-store', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true, flatMargin: 150 },
+    { id: 'sahibinden_tr', key: 'tr', name: 'Sahibinden Türkiye', defCountry: '62', price: 200, serviceHints: ['sahibinden'], guessCodes: [], icon: 'fa-shop', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true, flatMargin: 150 },
+    { id: 'dolap_tr', key: 'tr', name: 'Dolap Türkiye', defCountry: '62', price: 350, serviceHints: ['dolap'], guessCodes: [], icon: 'fa-shirt', iconSet: 'fa-solid', bg: 'bg-pink-500/10', color: 'text-pink-400', dynamicPricing: true, flatMargin: 150 },
+    { id: 'letgo_tr', key: 'tr', name: 'Letgo Türkiye', defCountry: '62', price: 250, serviceHints: ['letgo'], guessCodes: [], icon: 'fa-tag', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-300', dynamicPricing: true, flatMargin: 150 },
+    { id: 'uber_tr', key: 'tr', name: 'Uber Türkiye', defCountry: '62', price: 200, serviceHints: ['uber'], guessCodes: ['ub'], icon: 'fa-uber', iconSet: 'fa-brands', bg: 'bg-slate-500/10', color: 'text-slate-200' },
+    { id: 'paycell_tr', key: 'tr', name: 'Paycell Türkiye', defCountry: '62', price: 250, serviceHints: ['paycell'], guessCodes: [], icon: 'fa-credit-card', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true, flatMargin: 150 },
+    { id: 'trendyolgo_tr', key: 'tr', name: 'Trendyol Go', defCountry: '62', price: 200, serviceHints: ['trendyol go', 'trendyolgo'], guessCodes: [], icon: 'fa-motorcycle', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-400' },
+    { id: 'paypal_tr', key: 'tr', name: 'PayPal Türkiye', defCountry: '62', price: 250, serviceHints: ['paypal'], guessCodes: ['mt', 'pp'], icon: 'fa-paypal', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-300', dynamicPricing: true, flatMargin: 150 },
+    { id: 'trendyol_tr', key: 'tr', name: 'Trendyol', defCountry: '62', price: 200, serviceHints: ['trendyol'], guessCodes: [], icon: 'fa-bag-shopping', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-400' },
+    { id: 'ds_tr', key: 'tr', name: 'Discord Türkiye', defCountry: '62', price: 100, serviceHints: ['discord'], guessCodes: ['ds', 'dc'], icon: 'fa-discord', iconSet: 'fa-brands', bg: 'bg-indigo-500/10', color: 'text-indigo-400' },
+    { id: 'ap_tr', key: 'tr', name: 'Apple Türkiye', defCountry: '62', price: 200, serviceHints: ['apple', 'icloud'], guessCodes: ['mz', 'ap'], icon: 'fa-apple', iconSet: 'fa-brands', bg: 'bg-slate-500/10', color: 'text-slate-300', dynamicPricing: true, flatMargin: 150 },
+    // 2026-11-05: admin isteğiyle eklendi (sms.tc üzerinden) - admin bu 7'sine kesin TL değeri verdi, sabitlendi.
+    { id: 'hopi_tr', key: 'tr', name: 'Hopi Türkiye', defCountry: '62', price: 200, serviceHints: ['hopi'], guessCodes: [], icon: 'fa-gift', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300' },
+    { id: 'yemeksepeti_tr', key: 'tr', name: 'Yemeksepeti Türkiye', defCountry: '62', price: 300, serviceHints: ['yemeksepeti'], guessCodes: [], icon: 'fa-utensils', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-400' },
+    { id: 'hepsiburada_tr', key: 'tr', name: 'Hepsi Burada Türkiye', defCountry: '62', price: 250, serviceHints: ['hepsiburada', 'hepsi burada'], guessCodes: [], icon: 'fa-cart-shopping', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-400' },
+    { id: 'steam_tr', key: 'tr', name: 'Steam Türkiye', defCountry: '62', price: 200, serviceHints: ['steam'], guessCodes: ['st', 'su'], icon: 'fa-steam', iconSet: 'fa-brands', bg: 'bg-slate-500/10', color: 'text-slate-300' },
+    { id: 'oyuneks_tr', key: 'tr', name: 'Oyuneks Türkiye', defCountry: '62', price: 200, serviceHints: ['oyuneks'], guessCodes: [], icon: 'fa-gamepad', iconSet: 'fa-solid', bg: 'bg-purple-500/10', color: 'text-purple-400' },
+    { id: 'ms_tr', key: 'tr', name: 'Microsoft Türkiye', defCountry: '62', price: 150, serviceHints: ['microsoft', 'outlook', 'hotmail'], guessCodes: ['mm', 'ms'], icon: 'fa-microsoft', iconSet: 'fa-brands', bg: 'bg-sky-500/10', color: 'text-sky-400' },
+    { id: 'google_tr', key: 'tr', name: 'Google / Gmail / Youtube Türkiye', defCountry: '62', price: 200, serviceHints: ['google', 'gmail', 'youtube'], guessCodes: ['go', 'ya'], icon: 'fa-google', iconSet: 'fa-brands', bg: 'bg-red-500/10', color: 'text-red-400' }
 ];
 // Admin panelden elle eklenmiş ürünler (disk'ten yüklendi) - sunucu her yeniden başladığında CATALOG'a geri eklenir,
 // böylece admin'in eklediği ürünler bir Render yeniden başlatmasıyla kaybolmaz.
@@ -660,6 +702,8 @@ async function fetchPricesForCountry(countryId) {
     return out;
 }
 // Maliyetten satış fiyatı: çarpanla çarpılır, 10 TL'ye yuvarlanır, en az +20 TL kâr garantilenir.
+// (Sadece "Diğer SMS Platformları" otomatik listesi için kullanılıyor - ana katalogdaki ürünler artık
+// ya tamamen sabit fiyatlı ya da aşağıdaki computeFlatMarginPrice ile +150 TL sabit kârla fiyatlanıyor.)
 function computeOtherPrice(costUsd) {
     const rate = db.usdTryRate || 42;
     const mult = (db.otherPlatformsMarkup && db.otherPlatformsMarkup.multiplier) || 1.8;
@@ -668,7 +712,14 @@ function computeOtherPrice(costUsd) {
     if (price < costTry + 20) price = Math.ceil((costTry + 20) / 10) * 10;
     return price;
 }
-// Ana kataloğun (WhatsApp TR, Telegram TR vb.) satış fiyatını canlı sağlayıcı maliyetinden hesaplar.
+// 2026-11-06: admin isteğiyle eklendi - katalogdaki "diğer" ürünler (admin'in özel bir TL değeri vermediği
+// ürünler) artık çarpanla değil, DÜZ (sabit) bir TL kârıyla fiyatlanıyor: satış = canlı maliyet (TL) + marginTry.
+function computeFlatMarginPrice(costUsd, marginTry) {
+    const rate = db.usdTryRate || 42;
+    const costTry = costUsd * rate;
+    return Math.ceil((costTry + marginTry) / 10) * 10;
+}
+// Ana kataloğun dynamicPricing:true işaretli ürünlerinin satış fiyatını canlı sağlayıcı maliyetinden hesaplar.
 // Stok yoksa / fiyat alınamazsa null döner - çağıran yer bu durumda eski (son bilinen) fiyatı korur.
 async function getLiveSalePrice(item) {
     try {
@@ -677,7 +728,7 @@ async function getLiveSalePrice(item) {
         const prices = await fetchServicePrices(serviceCode);
         const best = candidates.find(c => prices[c] && prices[c].count > 0);
         if (!best) return null;
-        return computeOtherPrice(prices[best].cost);
+        return item.flatMargin ? computeFlatMarginPrice(prices[best].cost, item.flatMargin) : computeOtherPrice(prices[best].cost);
     } catch (e) { return null; }
 }
 // CATALOG'daki "dynamicPricing" işaretli ürünlerin fiyatını arka planda periyodik tazeler - böylece
@@ -876,13 +927,13 @@ app.post('/api/deposit/notify', async (req, res) => {
     db.payments[paymentId] = { id: paymentId, username, senderName, amount: parseFloat(amount), status: 'pending', time: new Date().toLocaleString('tr-TR'), ts: Date.now() };
     persist();
 
-    try {
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            chat_id: ADMIN_CHAT_ID,
-            text: `💰 Yeni Ödeme Bildirimi!\n\nKullanıcı: ${username}\nGönderen: ${senderName}\nTutar: ${amount} TL`,
-            reply_markup: { inline_keyboard: [[{ text: "✅ Onayla", callback_data: `approve|${paymentId}` }, { text: "❌ Reddet", callback_data: `reject|${paymentId}` }]] }
-        });
-    } catch (e) {}
+    // Ödeme bildirimi artık 4 kanala birden gidiyor: (1) admin panelindeki "Bekleyen Ödemeler" listesi (zaten
+    // anında güncel, ayrı bir şey yapmaya gerek yok), (2) bottaki Telegram sohbeti (ADMIN_CHAT_ID), (3) admin'in
+    // kişisel Telegram hesabı (ADMIN_CHAT_ID_2), (4) WhatsApp (CallMeBot, aşağıda).
+    await notifyAdminTelegram(
+        `💰 Yeni Ödeme Bildirimi!\n\nKullanıcı: ${username}\nGönderen: ${senderName}\nTutar: ${amount} TL`,
+        { reply_markup: { inline_keyboard: [[{ text: "✅ Onayla", callback_data: `approve|${paymentId}` }, { text: "❌ Reddet", callback_data: `reject|${paymentId}` }]] } }
+    );
     // Onayla/Reddet butonları sadece Telegram'da çalışır (WhatsApp'ta etkileşimli buton yok) - WhatsApp
     // bildirimi sadece haber amaçlı düz metin olarak gider, onay yine panelden veya Telegram'dan yapılır.
     notifyAdminWhatsapp(`💰 Yeni ödeme bildirimi!\nKullanıcı: ${username}\nGönderen: ${senderName}\nTutar: ${amount} TL\nOnaylamak için panele veya Telegram'a bak.`);
@@ -897,15 +948,16 @@ app.get('/api/admin/getData', (req, res) => {
 
     const users = Object.values(db.users).map(u => ({ username: u.username, balance: u.balance, role: u.role, banned: !!u.banned, registeredAt: u.registeredAt || '-' }));
     const payments = Object.values(db.payments).sort((a, b) => (b.ts || 0) - (a.ts || 0));
-    const logins = db.logins.slice(0, 100);
-    const orders = Object.values(db.orders).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 100);
+    // 2026-11-06: admin isteğiyle "Giriş Yapanlar" / "Ziyaretçiler" panelden kaldırıldı - artık bu veriler
+    // admin'e gönderilmiyor (db.visitors/db.logins arka planda sessizce tutulmaya devam ediyor, ileride
+    // istenirse geri eklenebilir, ama şu an panel karmaşasını azaltmak için gizli).
+    const orders = Object.values(db.orders).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 150);
     const supportChats = Object.keys(db.support).map(u => ({ username: u, last: db.support[u][db.support[u].length - 1], count: db.support[u].length })).sort((a, b) => (b.last ? b.last.ts : 0) - (a.last ? a.last.ts : 0));
     const catalogList = CATALOG.map(c => ({ id: c.id, name: c.name, price: c.price, manual: !!c.manual }));
-    const visitorList = db.visitors.slice(0, 100);
     const smmOrders = Object.values(db.smmOrders).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 100);
     const smmConfig = SMM_CATALOG.map(c => Object.assign({ id: c.id, name: c.name }, db.smmConfig[c.id] || {}));
 
-    res.json({ success: true, users, payments, logins, orders, supportChats, visitors: db.visitors.length, visitorList, catalog: catalogList, smmOrders, smmConfig, otherPlatformsMarkup: (db.otherPlatformsMarkup && db.otherPlatformsMarkup.multiplier) || 1.8 });
+    res.json({ success: true, users, payments, orders, supportChats, catalog: catalogList, smmOrders, smmConfig, otherPlatformsMarkup: (db.otherPlatformsMarkup && db.otherPlatformsMarkup.multiplier) || 1.8 });
 });
 
 app.post('/api/admin/processPayment', (req, res) => {
@@ -1149,11 +1201,13 @@ app.post('/api/support/send', async (req, res) => {
     db.support[username].push(msg);
     if (db.support[username].length > 200) db.support[username].shift();
 
-    try {
-        const sent = await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: ADMIN_CHAT_ID, text: `💬 Destek | ${username}:\n${msg.text}` });
-        const tgId = sent.data && sent.data.result && sent.data.result.message_id;
-        if (tgId) supportMsgMap[tgId] = username;
-    } catch (e) {}
+    for (const chatId of ADMIN_CHAT_IDS) {
+        try {
+            const sent = await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: `💬 Destek | ${username}:\n${msg.text}` });
+            const tgId = sent.data && sent.data.result && sent.data.result.message_id;
+            if (tgId) supportMsgMap[tgId] = username;
+        } catch (e) {}
+    }
 
     res.json({ success: true });
 });
@@ -1184,13 +1238,13 @@ let lastBalanceAlert = 0;
 async function notifyLowProviderBalance(text) {
     if (Date.now() - lastBalanceAlert < 600000) return; // en fazla 10 dakikada bir
     lastBalanceAlert = Date.now();
-    try { await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: ADMIN_CHAT_ID, text }); } catch (e) {}
+    await notifyAdminTelegram(text);
 }
 let lastPurchaseFailAlert = 0;
 async function notifyPurchaseFailure(text) {
     if (Date.now() - lastPurchaseFailAlert < 8000) return; // aynı anda art arda gelen denemelerde spam olmasın diye 8sn
     lastPurchaseFailAlert = Date.now();
-    try { await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: ADMIN_CHAT_ID, text }); } catch (e) {}
+    await notifyAdminTelegram(text);
 }
 // Admin girişi (başarılı veya hatalı deneme) Telegram'dan anında bildirilir - kilitlenme/başarı mesajları
 // hep gönderilir, ardı ardına gelen hatalı deneme spam'ını önlemek için sadece sıradan hatalı denemeler kısılır.
@@ -1198,7 +1252,7 @@ let lastAdminLoginAlert = 0;
 async function notifyAdminLoginEvent(text, important) {
     if (!important && Date.now() - lastAdminLoginAlert < 4000) return;
     lastAdminLoginAlert = Date.now();
-    try { await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: ADMIN_CHAT_ID, text }); } catch (e) {}
+    await notifyAdminTelegram(text);
 }
 
 const PROVIDER_ERRORS = {
@@ -1503,7 +1557,38 @@ const webhookPath = `/api/telegram-webhook-${TELEGRAM_BOT_TOKEN}`;
 app.post(webhookPath, async (req, res) => {
     const update = req.body;
     try {
-        if (update.message && update.message.reply_to_message && String(update.message.chat.id) === String(ADMIN_CHAT_ID)) {
+        // ====== /yedek komutu VE dosya yükleyerek geri yükleme (veri kaybına karşı güvenlik ağı) ======
+        if (update.message && ADMIN_CHAT_IDS.includes(String(update.message.chat.id)) && !update.message.reply_to_message) {
+            const chatId = update.message.chat.id;
+            const cmdText = (update.message.text || '').trim().toLowerCase();
+            if (cmdText === '/yedek' || cmdText === '/backup') {
+                await sendDbBackupToAdmin('elle istendi: ' + cmdText);
+            } else if (update.message.document) {
+                try {
+                    const fileId = update.message.document.file_id;
+                    const fileInfo = await axios.get(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile`, { params: { file_id: fileId } });
+                    const filePath = fileInfo.data && fileInfo.data.result && fileInfo.data.result.file_path;
+                    if (filePath) {
+                        const fileResp = await axios.get(`https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`, { responseType: 'text', transformResponse: x => x });
+                        const restored = JSON.parse(fileResp.data);
+                        if (restored && restored.users && typeof restored.users === 'object') {
+                            db = Object.assign({}, DEFAULT_DB, restored);
+                            for (const k in DEFAULT_DB) if (db[k] === undefined) db[k] = DEFAULT_DB[k];
+                            for (const u in DEFAULT_DB.users) if (!db.users[u]) db.users[u] = DEFAULT_DB.users[u];
+                            db.users[ADMIN_USERNAME] = Object.assign({ balance: 5000 }, db.users[ADMIN_USERNAME] || {}, { username: ADMIN_USERNAME, password: ADMIN_PASSWORD, role: 'admin', banned: false });
+                            persist();
+                            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: `✅ Yedek geri yüklendi: ${Object.keys(db.users).length} kullanıcı, ${Object.keys(db.orders).length} sipariş. Panel şimdi bu veriyle çalışıyor.`, reply_to_message_id: update.message.message_id });
+                        } else {
+                            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: `❌ Bu dosya geçerli bir Anka yedek dosyasına benzemiyor (içinde "users" alanı yok).`, reply_to_message_id: update.message.message_id });
+                        }
+                    }
+                } catch (e) {
+                    console.error('[webhook yedek geri yükleme] hata:', e.message);
+                    try { await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: `❌ Yedek geri yüklenemedi: ${e.message}` }); } catch (e2) {}
+                }
+            }
+        }
+        if (update.message && update.message.reply_to_message && ADMIN_CHAT_IDS.includes(String(update.message.chat.id))) {
             const origId = update.message.reply_to_message.message_id;
             const username = supportMsgMap[origId];
             const replyText = (update.message.text || '').trim();
@@ -1512,13 +1597,13 @@ app.post(webhookPath, async (req, res) => {
                 db.support[username].push({ from: 'admin', text: replyText, time: new Date().toLocaleString('tr-TR'), ts: Date.now() });
                 if (db.support[username].length > 200) db.support[username].shift();
                 persist();
-                await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: ADMIN_CHAT_ID, text: `➡️ ${username} kullanıcısına iletildi.`, reply_to_message_id: update.message.message_id });
+                await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: update.message.chat.id, text: `➡️ ${username} kullanıcısına iletildi.`, reply_to_message_id: update.message.message_id });
             }
         }
         if (update.callback_query) {
             const cb = update.callback_query;
             const chatId = cb.message.chat.id;
-            if (String(chatId) === String(ADMIN_CHAT_ID)) {
+            if (ADMIN_CHAT_IDS.includes(String(chatId))) {
                 const sep = cb.data.indexOf('|');
                 const action = cb.data.slice(0, sep);
                 const paymentId = cb.data.slice(sep + 1);
@@ -1528,11 +1613,13 @@ app.post(webhookPath, async (req, res) => {
                         payment.status = 'approved';
                         if (db.users[payment.username]) db.users[payment.username].balance += payment.amount;
                         persist();
-                        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: `✅ Ödeme Onaylandı!\nKullanıcı: ${payment.username}\nTutar: ${payment.amount} TL` });
+                        // İki admin sohbetinden hangisinden onaylandıysa onaylandı - diğer sohbete de haber ver ki
+                        // iki yerden aynı anda bakan admin çift işlem yapmaya çalışmasın.
+                        await notifyAdminTelegram(`✅ Ödeme Onaylandı!\nKullanıcı: ${payment.username}\nTutar: ${payment.amount} TL`);
                     } else if (action === 'reject') {
                         payment.status = 'rejected';
                         persist();
-                        await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: `❌ Ödeme Reddedildi!\nKullanıcı: ${payment.username}` });
+                        await notifyAdminTelegram(`❌ Ödeme Reddedildi!\nKullanıcı: ${payment.username}`);
                     }
                 }
             }
@@ -2308,18 +2395,25 @@ app.get('/', (req, res) => {
                         '</div>';
                 }).join('') + '</div>';
 
-                var loginsHtml = '<div class="max-h-56 overflow-y-auto space-y-1">' + data.logins.map(function (l) {
-                    return '<div class="bg-black/30 px-3 py-2 rounded-lg text-xs flex flex-wrap justify-between gap-1"><span class="font-bold text-white">' + l.username + '</span><span class="text-slate-400 font-mono">' + l.ip + '</span><span class="text-violet-400">' + (l.source || '-') + '</span><span class="text-slate-500">' + l.time + '</span></div>';
-                }).join('') + '</div>';
-                if (!data.logins.length) loginsHtml = '<p class="text-sm text-slate-500">Henüz giriş kaydı yok.</p>';
-
-                var visitorsHtml = '<div class="max-h-56 overflow-y-auto space-y-1">' + (data.visitorList || []).map(function (v) {
-                    return '<div class="bg-black/30 px-3 py-2 rounded-lg text-xs flex flex-wrap justify-between gap-1"><span class="text-slate-400 font-mono">' + v.ip + '</span><span class="text-violet-400 font-bold">' + v.source + '</span><span class="text-slate-500">' + v.time + '</span></div>';
-                }).join('') + '</div>';
-                if (!data.visitorList || !data.visitorList.length) visitorsHtml = '<p class="text-sm text-slate-500">Henüz ziyaretçi kaydı yok.</p>';
-
-                var ordersHtml = '<div class="max-h-56 overflow-y-auto space-y-1">' + data.orders.map(function (o) {
-                    return '<div class="bg-black/30 px-3 py-2 rounded-lg text-xs flex justify-between"><span class="font-bold text-white">' + o.username + '</span><span>' + o.productName + '</span><span class="font-mono">' + o.phoneNumber + '</span><span class="text-slate-500">' + o.status + '</span><span class="text-slate-500">' + o.time + '</span></div>';
+                // Durumu Türkçe + renkli rozet olarak göster: müşteri numarayı aldı mı (kod geldi), bekliyor mu,
+                // iptal mi etti, yoksa süresi mi doldu - admin tek bakışta anlasın.
+                var ORDER_STATUS_LABELS = {
+                    completed: { t: 'Alındı (kod geldi)', c: 'text-violet-400' },
+                    waiting: { t: 'Bekleniyor', c: 'text-amber-400' },
+                    cancelled: { t: 'İptal Edildi', c: 'text-red-400' },
+                    expired: { t: 'Süresi Doldu', c: 'text-slate-400' }
+                };
+                var ordersHtml = '<div class="max-h-72 overflow-y-auto space-y-1">' + data.orders.map(function (o) {
+                    var st = ORDER_STATUS_LABELS[o.status] || { t: o.status, c: 'text-slate-400' };
+                    return '<div class="bg-black/30 px-3 py-2 rounded-lg text-xs flex flex-wrap justify-between items-center gap-2">' +
+                        '<span class="font-bold text-white min-w-[90px]">' + o.username + '</span>' +
+                        '<span class="min-w-[140px]">' + o.productName + '</span>' +
+                        '<span class="font-mono">' + o.phoneNumber + '</span>' +
+                        (o.status === 'completed' ? '<span class="font-mono text-violet-300">kod: ' + o.code + '</span>' : '') +
+                        '<span>' + (o.price || 0) + ' TL</span>' +
+                        '<span class="' + st.c + ' font-bold">' + st.t + '</span>' +
+                        '<span class="text-slate-500">' + o.time + '</span>' +
+                        '</div>';
                 }).join('') + '</div>';
                 if (!data.orders.length) ordersHtml = '<p class="text-sm text-slate-500">Henüz sipariş yok.</p>';
 
@@ -2406,8 +2500,6 @@ app.get('/', (req, res) => {
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-money-bill-wave mr-1"></i> Bekleyen Ödemeler</h3>' + pendingHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-receipt mr-1"></i> Tüm Ödemeler (kim ödeme yapmış)</h3>' + allPayHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-users mr-1"></i> Kayıtlı Kullanıcılar</h3>' + usersHtml + '</div>' +
-                    '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-right-to-bracket mr-1"></i> Giriş Yapanlar (kullanıcı / IP / kaynak / zaman)</h3>' + loginsHtml + '</div>' +
-                    '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-eye mr-1"></i> Ziyaretçiler (IP / nereden geldi / zaman)</h3>' + visitorsHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-sim-card mr-1"></i> Son Siparişler</h3>' + ordersHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-headset mr-1"></i> Destek Sohbetleri</h3>' + supportHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-code mr-1"></i> Yeni Ürünler - Servis Kodu Ayarları</h3>' + serviceCodesHtml + '</div>' +
