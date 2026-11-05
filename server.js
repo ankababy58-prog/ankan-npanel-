@@ -10,7 +10,7 @@ app.use(bodyParser.json());
 
 // Her yeni dosya teslim edildiğinde bu tarihi değiştiriyoruz. Sitenin en altında küçük yazıyla görünür -
 // Render'a yüklediğin sürümün gerçekten güncellenip güncellenmediğini buradan kontrol edebilirsin.
-const APP_VERSION = '2026-11-04-17';
+const APP_VERSION = '2026-11-05-18';
 
 // ====== AYARLAR (Render > Environment bölümünden de girilebilir) ======
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8989904538:AAGETyb0e5ghitsYM3yWInhnIi3lexYMjPw';
@@ -482,6 +482,146 @@ async function countryCandidates(item, serviceCode) {
     const withoutInfo = nameList.filter(id => !prices[id]);
     const noStock = nameList.filter(id => prices[id] && prices[id].count === 0);
     // Öncelik: stoğu bilinen > bilgi yok (sağlayıcı yanıt vermediyse eski sıralama) > stoğu 0 görünen (yine de son çare dene, anlık değişebilir)
+    const ordered = [...withStock, ...withoutInfo, ...noStock];
+    return ordered.length ? ordered : nameList;
+}
+
+// ====== 2. SAĞLAYICI (OnaylaSMS) - yukarıdakiyle BİREBİR AYNI mantık, sadece providerGet yerine provider2Get
+// kullanılıyor ve kendi bağımsız önbellekleri var. Ana sağlayıcı (sms.tc) numara veremezse buyNumber içinde
+// otomatik olarak devreye girer. normTr/KEY_HINTS/nameHas yukarıdakiyle ortak kullanılıyor (sağlayıcıdan bağımsız). ======
+let servicesListCache2 = { time: 0, byCode: {} };
+async function resolveServicesList2() {
+    if (servicesListCache2.time && Date.now() - servicesListCache2.time < 3600000) return servicesListCache2;
+    const byCode = {};
+    try {
+        const r = await provider2Get({ action: 'getServicesList' }, 15000);
+        let d = r.data;
+        if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { d = null; } }
+        let arr = [];
+        if (Array.isArray(d)) arr = d;
+        else if (d && Array.isArray(d.services)) arr = d.services;
+        else if (d && typeof d === 'object') arr = Object.keys(d).map(k => ({ code: k, name: (d[k] && typeof d[k] === 'object') ? (d[k].name || d[k].title || d[k].eng) : d[k] }));
+        for (const s of arr) {
+            if (!s) continue;
+            const code = s.code !== undefined ? s.code : (s.id !== undefined ? s.id : s.key);
+            const name = s.name || s.title || s.eng || s.rus;
+            if (code !== undefined && name) byCode[String(code)] = String(name);
+        }
+        console.log('[resolveServicesList2/OnaylaSMS] ' + Object.keys(byCode).length + ' servis bulundu');
+    } catch (e) { console.error('[resolveServicesList2/OnaylaSMS] hata:', e.message); }
+    servicesListCache2 = { time: Date.now(), byCode };
+    return servicesListCache2;
+}
+
+let serviceOverrides2 = {};
+let serviceCodeCache2 = {};
+async function resolveServiceCode2(item) {
+    if (item.serviceCode) return item.serviceCode;
+    if (serviceOverrides2[item.id]) return serviceOverrides2[item.id];
+    const cached = serviceCodeCache2[item.id];
+    if (cached && Date.now() - cached.time < 3600000) return cached.code;
+    const { byCode } = await resolveServicesList2();
+    const hints = (item.serviceHints || []).map(normTr);
+    let found = null;
+    for (const code in byCode) {
+        const n = normTr(byCode[code]);
+        if (hints.some(h => n.includes(h))) { found = code; break; }
+    }
+    const code = found || (item.guessCodes && item.guessCodes[0]) || item.id;
+    serviceCodeCache2[item.id] = { code, time: Date.now(), confirmed: !!found };
+    if (!found) console.log('[resolveServiceCode2/OnaylaSMS] "' + item.name + '" için isimle eşleşme bulunamadı, tahmini kod deneniyor: ' + code);
+    return code;
+}
+
+let countryCache2 = { time: 0, map: {}, all: {} };
+async function resolveCountries2() {
+    if (countryCache2.time && Date.now() - countryCache2.time < 3600000) return countryCache2;
+    const map = {};
+    const wantedKeys = Array.from(new Set(CATALOG.map(c => c.key).filter(Boolean).concat(Object.keys(KEY_HINTS))));
+    const all = {};
+    wantedKeys.forEach(k => { all[k] = []; });
+    try {
+        const r = await provider2Get({ action: 'getCountries' }, 15000);
+        let d = r.data;
+        if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { d = null; } }
+        if (d && typeof d === 'object') {
+            const arr = Array.isArray(d) ? d : Object.keys(d).map(k => Object.assign({ _k: k }, typeof d[k] === 'object' ? d[k] : { name: d[k] }));
+            for (const c of arr) {
+                if (!c || typeof c !== 'object') continue;
+                const id = c.id !== undefined ? String(c.id) : (c._k !== undefined ? String(c._k) : null);
+                if (id === null) continue;
+                const names = Object.values(c).filter(v => typeof v === 'string' || typeof v === 'number').map(x => String(x).toLowerCase().trim());
+                for (const key in all) {
+                    if (names.some(n => nameHas(key, n))) { if (!map[key]) map[key] = id; if (!all[key].includes(id)) all[key].push(id); }
+                }
+            }
+        }
+    } catch (e) { console.error('[resolveCountries2/OnaylaSMS] hata:', e.message); }
+    countryCache2 = { time: Date.now(), map, all };
+    return countryCache2;
+}
+
+let priceCache2 = {};
+async function fetchServicePrices2(serviceCode) {
+    const cached = priceCache2[serviceCode];
+    if (cached && Date.now() - cached.time < 300000) return cached.data;
+    const out = {};
+    try {
+        const r = await provider2Get({ action: 'getPrices', service: serviceCode }, 15000);
+        let d = r.data;
+        if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { d = null; } }
+        if (d && typeof d === 'object') {
+            if (d[serviceCode] && typeof d[serviceCode] === 'object') {
+                for (const cid in d[serviceCode]) {
+                    const svc = d[serviceCode][cid];
+                    if (svc && typeof svc === 'object') {
+                        const cost = svc.cost !== undefined ? svc.cost : (svc.price !== undefined ? svc.price : 0);
+                        const count = svc.count !== undefined ? svc.count : (svc.quant !== undefined ? svc.quant : (svc.quantity !== undefined ? svc.quantity : 0));
+                        out[cid] = { cost: Number(cost) || 0, count: Number(count) || 0 };
+                    }
+                }
+            }
+            if (Object.keys(out).length === 0) {
+                for (const cid in d) {
+                    const v = d[cid];
+                    if (!v || typeof v !== 'object') continue;
+                    const svc = (v[serviceCode] !== undefined) ? v[serviceCode] : v;
+                    if (svc && typeof svc === 'object') {
+                        const cost = svc.cost !== undefined ? svc.cost : (svc.price !== undefined ? svc.price : 0);
+                        const count = svc.count !== undefined ? svc.count : (svc.quant !== undefined ? svc.quant : (svc.quantity !== undefined ? svc.quantity : 0));
+                        if (cost || count) out[cid] = { cost: Number(cost) || 0, count: Number(count) || 0 };
+                    }
+                }
+            }
+        }
+        console.log('[fetchServicePrices2/OnaylaSMS] ' + serviceCode + ' -> ' + Object.keys(out).length + ' ülke bulundu, stoklu: ' + Object.keys(out).filter(k => out[k].count > 0).length);
+    } catch (e) { console.error('[fetchServicePrices2/OnaylaSMS] hata:', e.message); }
+    priceCache2[serviceCode] = { time: Date.now(), data: out };
+    return out;
+}
+
+async function countryCandidates2(item, serviceCode) {
+    const { map, all } = await resolveCountries2();
+    const nameList = [];
+    if (item.randomPool && item.randomPool.length) {
+        item.randomPool.forEach(k => {
+            const p = map[k]; if (p && !nameList.includes(p)) nameList.push(p);
+            (all[k] || []).forEach(id => { if (!nameList.includes(id)) nameList.push(id); });
+        });
+        if (item.defCountry && !nameList.includes(item.defCountry)) nameList.push(item.defCountry);
+    } else {
+        const primary = map[item.key] || item.defCountry;
+        nameList.push(primary);
+        (all[item.key] || []).forEach(id => { if (!nameList.includes(id)) nameList.push(id); });
+        (item.alt || []).forEach(id => { if (!nameList.includes(id)) nameList.push(id); });
+        if (!nameList.includes(item.defCountry)) nameList.push(item.defCountry);
+    }
+
+    const prices = await fetchServicePrices2(serviceCode || item.serviceCode);
+    const withStock = nameList.filter(id => prices[id] && prices[id].count > 0)
+        .sort((a, b) => (prices[a].cost - prices[b].cost) || (prices[b].count - prices[a].count));
+    const withoutInfo = nameList.filter(id => !prices[id]);
+    const noStock = nameList.filter(id => prices[id] && prices[id].count === 0);
     const ordered = [...withStock, ...withoutInfo, ...noStock];
     return ordered.length ? ordered : nameList;
 }
@@ -1097,6 +1237,7 @@ app.post('/api/buyNumber', async (req, res) => {
         let usedCountry = null;
         let allRaw = [];
         let sawNoBalance = false;
+        let orderProvider = 'primary';
 
         const ATTEMPTS_PER_COUNTRY = 2; // adaylar artık canlı stoğa göre sıralı, gereksiz yere aynı ülkede bekletmeye gerek yok
         // "havuzda stok yok" hatasının en sık kökeni önbellekteki (45sn/1sa) fiyat-stok bilgisinin bayatlamış
@@ -1149,6 +1290,35 @@ app.post('/api/buyNumber', async (req, res) => {
             if (!responseText.startsWith('NO_NUMBERS') && pass === 0) break;
         }
 
+        // Ana sağlayıcı (sms.tc) numara veremedi (BAD_KEY, NO_NUMBERS, NO_BALANCE, bağlantı vb.) - otomatik
+        // olarak 2. sağlayıcı (OnaylaSMS) ile dene, müşteriye yine aynı fiyattan ("garanti numara") teslim et.
+        if (!responseText.startsWith('ACCESS_NUMBER')) {
+            try {
+                const serviceCode2 = await resolveServiceCode2(item);
+                const candidates2 = (await countryCandidates2(item, serviceCode2)).slice(0, 4);
+                outer2:
+                for (const country2 of candidates2) {
+                    for (let attempt2 = 0; attempt2 < 2; attempt2++) {
+                        const resp2 = await provider2Get({ action: 'getNumber', service: serviceCode2, country: country2 }, 30000);
+                        let rt2 = resp2.data;
+                        if (typeof rt2 === 'object') rt2 = JSON.stringify(rt2);
+                        rt2 = rt2 ? String(rt2).trim() : '';
+                        allRaw.push('P2:' + country2 + ':' + rt2);
+                        console.log('[getNumber-P2/OnaylaSMS] ' + item.id + ' country=' + country2 + ' deneme=' + (attempt2 + 1) + ' -> "' + rt2 + '"');
+                        if (rt2.startsWith('ACCESS_NUMBER')) {
+                            responseText = rt2;
+                            usedCountry = country2;
+                            orderProvider = 'secondary';
+                            break outer2;
+                        }
+                        if (rt2.startsWith('NO_NUMBERS')) { if (attempt2 === 0) await new Promise(r => setTimeout(r, 800)); continue; }
+                        if (rt2.startsWith('TOO_MANY_REQUESTS')) { await new Promise(r => setTimeout(r, 4000)); continue; }
+                        break; // başka ülkeye geç
+                    }
+                }
+            } catch (e2) { console.error('[buyNumber P2/OnaylaSMS] hata:', e2.message); }
+        }
+
         if (responseText.startsWith('ACCESS_NUMBER')) {
             const parts = responseText.split(':');
             const activationId = parts[1];
@@ -1157,7 +1327,7 @@ app.post('/api/buyNumber', async (req, res) => {
             const order = {
                 activationId, productName: item.name, price, phoneNumber,
                 code: "Bekleniyor...", status: 'waiting', username,
-                time: new Date().toLocaleString('tr-TR'), createdAt: Date.now()
+                time: new Date().toLocaleString('tr-TR'), createdAt: Date.now(), provider: orderProvider
             };
             db.orders[activationId] = order;
             persist();
@@ -1284,7 +1454,8 @@ app.post('/api/cancelNumber', async (req, res) => {
     if (order.status !== 'waiting') return res.json({ success: false, message: "Bu sipariş iptal edilemez." });
 
     try {
-        const resp = await providerGet({ action: 'setStatus', status: 8, id: activationId }, 20000);
+        const gw = order.provider === 'secondary' ? provider2Get : providerGet;
+        const resp = await gw({ action: 'setStatus', status: 8, id: activationId }, 20000);
         const text = String(resp.data || '').trim();
         if (text.startsWith('ACCESS_CANCEL')) {
             userObj.balance += order.price;
@@ -1308,7 +1479,8 @@ app.get('/api/checkSms/:id', async (req, res) => {
     if (!order || order.status !== 'waiting') return res.json({ success: false, message: "Sipariş aktif değil." });
 
     try {
-        const resp = await providerGet({ action: 'getStatus', id: activationId }, 20000);
+        const gw = order.provider === 'secondary' ? provider2Get : providerGet;
+        const resp = await gw({ action: 'getStatus', id: activationId }, 20000);
         let responseText = resp.data;
         if (typeof responseText === 'object') responseText = JSON.stringify(responseText);
         responseText = responseText ? String(responseText).trim() : '';
@@ -2425,10 +2597,11 @@ setInterval(async () => {
         o.sweepTries = (o.sweepTries || 0) + 1;
         if (o.sweepTries > 5) { o.status = 'expired'; changed = true; continue; }
         try {
-            const st = await providerGet({ action: 'getStatus', id: id }, 15000);
+            const gw = o.provider === 'secondary' ? provider2Get : providerGet;
+            const st = await gw({ action: 'getStatus', id: id }, 15000);
             const t = String(st.data || '').trim();
             if (t.startsWith('STATUS_OK')) { o.code = t.split(':').slice(1).join(':'); o.status = 'completed'; changed = true; continue; }
-            const c = await providerGet({ action: 'setStatus', status: 8, id: id }, 15000);
+            const c = await gw({ action: 'setStatus', status: 8, id: id }, 15000);
             if (String(c.data || '').trim().startsWith('ACCESS_CANCEL') && db.users[o.username]) {
                 db.users[o.username].balance += o.price;
                 o.status = 'cancelled';
