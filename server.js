@@ -10,7 +10,7 @@ app.use(bodyParser.json());
 
 // Her yeni dosya teslim edildiğinde bu tarihi değiştiriyoruz. Sitenin en altında küçük yazıyla görünür -
 // Render'a yüklediğin sürümün gerçekten güncellenip güncellenmediğini buradan kontrol edebilirsin.
-const APP_VERSION = '2026-11-05-18';
+const APP_VERSION = '2026-11-05-19';
 
 // ====== AYARLAR (Render > Environment bölümünden de girilebilir) ======
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8989904538:AAGETyb0e5ghitsYM3yWInhnIi3lexYMjPw';
@@ -23,7 +23,7 @@ const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || 'https://g-venlip
 // SMS-Activate protokolünü konuşuyor (ACCESS_NUMBER:id:phone, STATUS_OK:code, NO_NUMBERS, NO_BALANCE,
 // api_key query parametresi vb.) - bu yüzden providerGet() hiç değişmeden sadece URL+key değişti.
 // ÖNEMLİ: sms.tc'de TÜM fiyat/bakiye değerleri USD cinsinden döner (TL değil) - bkz. USD_TRY_RATE.
-const ONAYLI_SMS_API_KEY = process.env.PROVIDER_API_KEY || 'smstc_live_0vHjhoWB7H8qniIpTV5GDwF3W04eNpXRUWHZ9GYW';
+const ONAYLI_SMS_API_KEY = process.env.PROVIDER_API_KEY || 'smstc_live_s58Cpjhzbhf9whvn1GiyYKix6FeuKLrO3MgtAHCi';
 const ONAYLI_SMS_URL = process.env.PROVIDER_URL || 'https://sms.tc/stubs/handler_api.php';
 // ====== 2. SAĞLAYICI (YEDEK): OnaylaSMS - aynı SMS-Activate uyumlu protokol, fiyatlar TL (USD değil) ======
 // Ana sağlayıcıda (sms.tc) numara bulunamazsa/hata verirse otomatik olarak buraya geçilir (bkz. buyNumber).
