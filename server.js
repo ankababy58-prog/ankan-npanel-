@@ -9,11 +9,9 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Her yeni dosya teslim edildiğinde bu tarihi değiştiriyoruz. Sitenin en altında küçük yazıyla görünür -
-// Render'a yüklediğin sürümün gerçekten güncellenip güncellenmediğini buradan kontrol edebilirsin.
-const APP_VERSION = '2026-11-06-42';
+const APP_VERSION = '2026-11-06-43';
 
-// ====== AYARLAR (Render > Environment bölümünden de girilebilir) ======
+// ====== AYARLAR ======
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9264065416:AAHZqKF6BhGS9cPRiigEfJSHp3bOC8j01kw';
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '8811977430';
 const ADMIN_CHAT_ID_2 = process.env.ADMIN_CHAT_ID_2 || '8935662812';
@@ -27,30 +25,18 @@ async function notifyAdminTelegram(text, extra) {
     }
 }
 
-const ADMIN_TELEGRAM_USERNAME = process.env.ADMIN_TELEGRAM_USERNAME || 'vipankaa';
-const ADMIN_WHATSAPP = process.env.ADMIN_WHATSAPP || '573181006792';
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || 'https://g-venlipanelsms.onrender.com';
 
-// ====== SHOPIER AYARLARI (Senin gönderdiğin anahtar entegre edildi) ======
+// ====== SHOPIER AYARLARI ======
 const SHOPIER_API_KEY = process.env.SHOPIER_API_KEY || '35d659c996555261cd7cb726e84e7d3f';
 const SHOPIER_API_SECRET = process.env.SHOPIER_API_SECRET || 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiIzNWQ2NTljOTk2NTU1MjYxY2Q3Y2I3MjZlODRlN2QzZiIsImp0aSI6IjkwYTc4NzUxZjI2ZjVjNmM4ZjUzMTc3MjlmY2Y4NTY3Y2FkNmUxZWQ2YzFmZmMyNTk4ZDQ2N2M3M2JiYTJlMWViMThmY2ZkMTA2OTM3ZDkyZTdjYTlmNGQwYzMwZTg3NTJjOTJlNzJiZGEwOWRkZDFmOWRiODhhZDQ5NDJiY2U3MDZhNGY0YjE3ZmI5OWViNjBhYThjNjFjYTU1MmE5MGQiLCJpYXQiOjE3OTM5NzE0ODIsIm5iZiI6MTc5Mzk3MTQ4MiwiZXhwIjoxOTUxNzU2MjQyLCJzdWIiOjMwOTQzNzQsInNjb3BlcyI6WyJvcmRlcnM6cmVhZCIsIm9yZGVyczp3cml0ZSIsInByb2R1Y3RzOnJlYWQiLCJwcm9kdWN0czp3cml0ZSIsInNoaXBwaW5nczpyZWFkIiwic2hpcHBpbmdzOndyaXRlIiwiZGlzY291bnRzOnJlYWQiLCJkaXNjb3VudHM6d3JpdGUiLCJwYXlvdXRzOnJlYWQiLCJyZWZ1bmRzOnJlYWQiLCJyZWZ1bmRzOndyaXRlIiwic2hvcDpyZWFkIiwic2hvcDp3cml0ZSJdfQ.nJu3lPJFhR2-NYEEtgfDy4YyG0WShqnYodYgplUiFUNLvQvEkisBZT5-rm7seuNEdvzT319AbLohpT1QM-8HmpUl31dpl9IFES9xUsxQ1OsEtbYPxzlEvu768l4T-KC1VixlxGS0AtXEuIDeeAseuCn3pCOkvcfq0ISY6D0Qw-5ZAs0ZwJcz1A_0yFt2I6BU6EpRR88fyhe4IVWmBb14EBRfsy1I9Nenh7iYpiKTMMDcmFgYaV4VUtlPlxqqAonC0kQNLEGonUD9mj535i0HcTYAnqEBOCMjdVsrnLLdx5R5gyyi7dG_RxfksRYMQ4MaF6eFwpTE9EDLkS6VLfry9g';
 
 // ====== SAĞLAYICI: sms.tc ======
 const ONAYLI_SMS_API_KEY = process.env.PROVIDER_API_KEY || 'smstc_live_s58Cpjhzbhf9whvn1GiyYKix6FeuKLrO3MgtAHCi';
 const ONAYLI_SMS_URL = process.env.PROVIDER_URL || 'https://sms.tc/stubs/handler_api.php';
-const PROVIDER2_API_KEY = process.env.PROVIDER2_API_KEY || 'osms_e110808da2665d8283a82cf4d6c9920aaa1cb92a2146c540';
-const PROVIDER2_URL = process.env.PROVIDER2_URL || 'https://onaylasms.com.tr/stubs/handler_api.php';
-
-const SMM_API_URL = process.env.SMM_API_URL || 'https://peakerr.com/api/v2';
-const SMM_API_KEY = process.env.SMM_API_KEY || '';
-const LOW_BALANCE_THRESHOLD = parseFloat(process.env.LOW_BALANCE_THRESHOLD || '5');
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'Aklomanti';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'AZC.anka.34';
-
-const ADMIN_LOGIN_MAX_ATTEMPTS = 5;
-const ADMIN_LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
-let adminLoginAttempts = {};
 
 const PROVIDER_MIN_INTERVAL_MS = 2200;
 let providerQueue = Promise.resolve();
@@ -66,40 +52,6 @@ function providerGet(params, timeout) {
     return run;
 }
 
-const PROVIDER2_MIN_INTERVAL_MS = 2200;
-const PROVIDER2_GETNUMBER_MIN_INTERVAL_MS = 4200;
-let provider2Queue = Promise.resolve();
-let lastProvider2CallAt = 0;
-let lastProvider2GetNumberAt = 0;
-function provider2Get(params, timeout) {
-    const isGetNumber = params && (params.action === 'getNumber' || params.action === 'getNumberV2');
-    const run = provider2Queue.then(async () => {
-        const wait = PROVIDER2_MIN_INTERVAL_MS - (Date.now() - lastProvider2CallAt);
-        if (wait > 0) await new Promise(r => setTimeout(r, wait));
-        if (isGetNumber) {
-            const wait2 = PROVIDER2_GETNUMBER_MIN_INTERVAL_MS - (Date.now() - lastProvider2GetNumberAt);
-            if (wait2 > 0) await new Promise(r => setTimeout(r, wait2));
-            lastProvider2GetNumberAt = Date.now();
-        }
-        lastProvider2CallAt = Date.now();
-        return axios.get(PROVIDER2_URL, { params: Object.assign({ api_key: PROVIDER2_API_KEY }, params), timeout: timeout || 20000 });
-    });
-    provider2Queue = run.then(() => {}, () => {});
-    return run;
-}
-
-const CALLMEBOT_APIKEY = process.env.CALLMEBOT_APIKEY || '';
-async function notifyAdminWhatsapp(text) {
-    if (!CALLMEBOT_APIKEY) return;
-    try {
-        const phone = ADMIN_WHATSAPP.startsWith('+') ? ADMIN_WHATSAPP : ('+' + ADMIN_WHATSAPP);
-        await axios.get('https://api.callmebot.com/whatsapp.php', {
-            params: { phone, text, apikey: CALLMEBOT_APIKEY },
-            timeout: 15000
-        });
-    } catch (e) { console.error('[notifyAdminWhatsapp] hata:', e.message); }
-}
-
 const DEFAULT_DB = {
     users: {
         [ADMIN_USERNAME]: { username: ADMIN_USERNAME, password: ADMIN_PASSWORD, balance: 5000, role: "admin", banned: false }
@@ -110,11 +62,7 @@ const DEFAULT_DB = {
     orders: {},
     support: {},
     adminSessions: {},
-    smmConfig: {},
-    smmOrders: {},
-    customCatalog: [],
-    otherPlatformsMarkup: { multiplier: 1.8 },
-    usdTryRate: 42
+    customCatalog: []
 };
 
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'anka_data.json');
@@ -146,25 +94,11 @@ function persist() {
 }
 
 const CATALOG = [
-    { id: 'tg_tr', key: 'tr', name: 'Telegram Türkiye', serviceCode: 'tg', defCountry: '62', price: 250, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400', featured: true },
-    { id: 'tg_co', key: 'co', name: 'Telegram Kolombiya', serviceCode: 'tg', defCountry: '10', price: 150, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400' },
-    { id: 'tg_us', key: 'us', name: 'Telegram Amerika', serviceCode: 'tg', defCountry: '187', alt: ['12'], price: 200, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400' },
-    { id: 'tg_gb', key: 'gb', name: 'Telegram İngiltere', serviceCode: 'tg', defCountry: '16', price: 200, icon: 'fa-telegram', iconSet: 'fa-brands', bg: 'bg-blue-500/10', color: 'text-blue-400' },
-    { id: 'wa_tr', key: 'tr', name: 'WhatsApp Türkiye', serviceCode: 'wa', defCountry: '62', price: 300, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400', featured: true },
-    { id: 'wa_us', key: 'us', name: 'WhatsApp Amerika', serviceCode: 'wa', defCountry: '187', alt: ['12'], price: 250, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400' },
-    { id: 'wa_gb', key: 'gb', name: 'WhatsApp İngiltere', serviceCode: 'wa', defCountry: '16', price: 250, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400' },
-    { id: 'wa_sg', key: 'sg', name: 'WhatsApp Singapur', serviceCode: 'wa', defCountry: '52', price: 200, icon: 'fa-whatsapp', iconSet: 'fa-brands', bg: 'bg-violet-500/10', color: 'text-violet-400' }
+    { id: 'tg_tr', key: 'tr', name: 'Telegram Türkiye', serviceCode: 'tg', defCountry: '62', price: 250 },
+    { id: 'wa_tr', key: 'tr', name: 'WhatsApp Türkiye', serviceCode: 'wa', defCountry: '62', price: 300 }
 ];
 
 (db.customCatalog || []).forEach(p => { if (p && p.id && !CATALOG.some(c => c.id === p.id)) CATALOG.push(p); });
-
-function checkAdminToken(token) {
-    const sess = token && db.adminSessions[token];
-    if (!sess) return null;
-    if (Date.now() - sess.ts > 7 * 24 * 60 * 60 * 1000) { delete db.adminSessions[token]; persist(); return null; }
-    if (!db.users[sess.username] || db.users[sess.username].role !== 'admin') return null;
-    return sess.username;
-}
 
 // ====== SHOPIER ÖDEME BAŞLATMA UÇ NOKTASI ======
 app.post('/api/payment/shopier/create', (req, res) => {
@@ -258,4 +192,7 @@ app.post('/api/payment/shopier/callback', (req, res) => {
     }
 });
 
-const PORT
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Anka SMS Panel ${PORT} portunda aktif.`);
+});
