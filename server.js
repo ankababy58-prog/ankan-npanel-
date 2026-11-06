@@ -9,7 +9,7 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-const APP_VERSION = '2026-11-06-43';
+const APP_VERSION = '2026-11-06-44';
 
 // ====== AYARLAR ======
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9264065416:AAHZqKF6BhGS9cPRiigEfJSHp3bOC8j01kw';
@@ -99,6 +99,52 @@ const CATALOG = [
 ];
 
 (db.customCatalog || []).forEach(p => { if (p && p.id && !CATALOG.some(c => c.id === p.id)) CATALOG.push(p); });
+
+// ====== ANA SAYFA (PANEL ARAYÜZÜ) ======
+app.get('/', (req, res) => {
+    res.send(`<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8"><title>Anka SMS Panel</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-slate-950 text-slate-100 min-h-screen"><div class="max-w-4xl mx-auto p-4 sm:p-6"><header class="flex justify-between items-center bg-slate-900 border border-slate-800 p-4 rounded-xl mb-6 shadow-lg"><div><h1 class="text-xl font-bold text-violet-400"><i class="fa-solid fa-shield-halved mr-2"></i>Anka SMS Panel</h1><p class="text-xs text-slate-400">Sürüm: ${APP_VERSION}</p></div><div class="flex items-center gap-4"><span class="text-sm">Bakiye: <b id="lblBakiye" class="text-emerald-400">5000</b> TL</span><button onclick="openPaymentModal()" class="bg-emerald-600 hover:bg-emerald-500 text-xs px-3 py-2 rounded-lg font-semibold transition"><i class="fa-solid fa-wallet mr-1"></i>Bakiye Yükle</button></div></header><div class="bg-slate-900 border border-slate-800 rounded-xl p-5 mb-6 shadow-lg"><h2 class="text-lg font-semibold mb-4 text-violet-300"><i class="fa-solid fa-cart-shopping mr-2"></i>Numara Satın Al</h2><div id="catalogList" class="grid grid-cols-1 sm:grid-cols-2 gap-4"></div></div></div>
+
+    <!-- BAKİYE YÜKLE (SHOPIER) MODALI -->
+    <div id="paymentModal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center p-4"><div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-md shadow-2xl"><h3 class="text-lg font-bold mb-4 text-emerald-400"><i class="fa-solid fa-credit-card mr-2"></i>Shopier ile Bakiye Yükle</h3><input type="number" id="payAmount" placeholder="Yüklenecek Tutar (TL)" value="50" min="10" class="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl mb-4 text-sm text-white"><div class="flex justify-end gap-2"><button onclick="closePaymentModal()" class="bg-slate-800 px-4 py-2 rounded-xl text-xs">İptal</button><button onclick="startShopierPayment()" class="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-xl text-xs font-bold">Ödemeye Geç</button></div></div></div>
+
+    <div id="shopierFormContainer" class="hidden"></div>
+
+    <script>
+        async function loadCatalog() {
+            const res = await fetch('/api/catalog');
+            const data = await res.json();
+            const box = document.getElementById('catalogList');
+            box.innerHTML = '';
+            data.catalog.forEach(item => {
+                box.innerHTML += \`<div class="bg-slate-950 border border-slate-800 p-4 rounded-xl flex justify-between items-center"><div><h3 class="font-bold text-sm">\${item.name}</h3><p class="text-emerald-400 font-bold mt-1">\${item.price} TL</p></div><button onclick="buyNumber('\${item.id}')" class="bg-violet-600 hover:bg-violet-500 text-xs px-4 py-2 rounded-xl font-semibold transition">Satın Al</button></div>\`;
+            });
+        }
+        function openPaymentModal() { document.getElementById('paymentModal').classList.remove('hidden'); }
+        function closePaymentModal() { document.getElementById('paymentModal').classList.add('hidden'); }
+
+        async function startShopierPayment() {
+            const amount = document.getElementById('payAmount').value;
+            if(!amount || amount < 10) return alert('Lütfen en az 10 TL giriniz.');
+            const res = await fetch('/api/payment/shopier/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: 'Aklomanti', amount: parseFloat(amount) })
+            });
+            const data = await res.json();
+            if(data.success && data.htmlForm) {
+                document.getElementById('shopierFormContainer').innerHTML = data.htmlForm;
+                document.getElementById('shopier_payment_form').submit();
+            } else {
+                alert('Ödeme başlatılamadı.');
+            }
+        }
+        loadCatalog();
+    </script></body></html>`);
+});
+
+app.get('/api/catalog', (req, res) => {
+    res.json({ success: true, catalog: CATALOG });
+});
 
 // ====== SHOPIER ÖDEME BAŞLATMA UÇ NOKTASI ======
 app.post('/api/payment/shopier/create', (req, res) => {
