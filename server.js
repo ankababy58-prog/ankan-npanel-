@@ -82,6 +82,26 @@ function providerGet(params, timeout) {
     return run;
 }
 
+// ====== SHOPIER ÖDEME ENTEGRASYONU ======
+// Shopier'in YENİ REST API'si (api.shopier.com/v1), eski "api_pay4.php + HMAC imza" yöntemini DEĞİL,
+// Kişisel Erişim Anahtarı (PAT, Bearer token) ile çalışıyor. developer.shopier.com üzerinden adım adım
+// doğrulandı: /products ile "tek seferlik ödeme ürünü" oluşturuluyor (response'ta müşteriye vereceğimiz
+// ödeme linki = ürünün "url" alanı), /orders ile o siparişin ödenip ödenmediği (paymentStatus:'paid')
+// kontrol ediliyor. Gerçek zamanlı webhook, PAT ile değil sadece OAuth2 "uygulama"larla çalışıyor -
+// bu yüzden burada webhook YERİNE güvenli ve basit bir YOKLAMA (polling) döngüsü kullanılıyor (aşağıda,
+// shopierPollLoop). Tek secret: SHOPIER_PAT - Render > Environment'tan girilir, kodda asla sabit yazılmaz.
+const SHOPIER_PAT = process.env.SHOPIER_PAT || '';
+const SHOPIER_API_BASE = 'https://api.shopier.com/v1';
+// Admin'in istediği gibi SADECE bu 5 sabit paket Shopier ile yüklenebilir - müşteri serbest tutar giremez.
+const SHOPIER_PACKAGES = [300, 400, 500, 1000, 1500];
+function shopierRequest(method, pathStr, data) {
+    return axios({
+        method, url: SHOPIER_API_BASE + pathStr,
+        headers: { Authorization: 'Bearer ' + SHOPIER_PAT, 'Content-Type': 'application/json', Accept: 'application/json' },
+        data, timeout: 20000
+    });
+}
+
 // 2. sağlayıcı (OnaylaSMS) için AYRI kuyruk - getNumber/getNumberV2 dakikada 15 istekle sınırlı olduğundan
 // (diğer aksiyonlar dakikada 120), bu iki aksiyon için ekstra bir bekleme daha uygulanıyor.
 const PROVIDER2_MIN_INTERVAL_MS = 2200;
@@ -150,7 +170,11 @@ const DEFAULT_DB = {
     smmOrders: {}, // id -> {username, itemId, link, quantity, price, providerOrderId, status, time, ts}
     customCatalog: [], // admin panelden elle eklenen ürünler (sunucu yeniden başlayınca CATALOG'a geri yüklenir)
     otherPlatformsMarkup: { multiplier: 1.8 }, // "Diğer SMS Platformları" VE ana kataloğun kâr çarpanı - admin panelden ayarlanır
-    usdTryRate: 42 // sms.tc fiyatları USD döndürüyor - TL'ye çevirmek için kur, admin panelden güncellenebilir
+    usdTryRate: 42, // sms.tc fiyatları USD döndürüyor - TL'ye çevirmek için kur, admin panelden güncellenebilir
+    // Shopier admin panelden açılıp kapatılabilir - test edilip onaylanana kadar varsayılan KAPALI.
+    shopierEnabled: false,
+    shopierPending: {}, // productId -> {username, amount, createdAt, title}
+    shopierProcessedOrders: {} // orderId -> true (aynı siparişten iki kere bakiye yüklenmesini engellemek için)
 };
 
 // ====== KALICI KAYIT (dosyaya yazma) ======
@@ -918,6 +942,11 @@ app.post('/api/auth/register', (req, res) => {
     res.json({ success: true, username, role: "user" });
 });
 
+// Müşteri panelinin bakiye yükleme ekranı, Shopier seçeneğini gösterip göstermeyeceğini buradan öğrenir.
+app.get('/api/paymentConfig', (req, res) => {
+    res.json({ success: true, shopierEnabled: !!(db.shopierEnabled && SHOPIER_PAT), shopierPackages: SHOPIER_PACKAGES });
+});
+
 app.post('/api/deposit/notify', async (req, res) => {
     const { username, senderName, amount } = req.body;
     if (!username || !senderName || !amount) return res.json({ success: false, message: "Tüm alanları doldurun." });
@@ -941,6 +970,103 @@ app.post('/api/deposit/notify', async (req, res) => {
     res.json({ success: true, message: "Ödeme bildiriminiz alındı. İnceleniyor." });
 });
 
+// ====== SHOPIER: ödeme başlat ======
+// Müşteri "300/400/500/1000/1500 TL Shopier ile yükle" dediğinde çağrılır. Arka planda Shopier'de o tutarda
+// TEK SEFERLİK (stockQuantity:1), görünmez bir "dijital ürün" oluşturulur - müşteri bunu hiç ürün olarak
+// görmez, sadece kart bilgisi girip ödeyeceği bir sayfa açılır (ürünün Shopier'in döndürdüğü "url" alanı).
+app.post('/api/shopier/create', async (req, res) => {
+    const { username, amount } = req.body;
+    const amt = parseInt(amount, 10);
+    if (!db.shopierEnabled) return res.json({ success: false, message: "Shopier ile ödeme şu an kapalı." });
+    if (!SHOPIER_PAT) return res.json({ success: false, message: "Shopier henüz admin tarafından ayarlanmadı (SHOPIER_PAT eksik)." });
+    if (!username || !db.users[username]) return res.json({ success: false, message: "Geçersiz kullanıcı." });
+    if (db.users[username].banned) return res.json({ success: false, message: "Hesabınız yasaklandı." });
+    if (!SHOPIER_PACKAGES.includes(amt)) return res.json({ success: false, message: "Geçersiz tutar. Sadece şu paketler var: " + SHOPIER_PACKAGES.join(', ') + " TL." });
+
+    try {
+        const reqId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+        const title = `Bakiye Yukleme ${amt}TL - ${username} - ${reqId}`;
+        const resp = await shopierRequest('post', '/products', {
+            title,
+            description: 'Anka SMS panel bakiye yükleme - otomatik oluşturulmuş tek seferlik ödeme kaydı.',
+            type: 'digital',
+            media: [],
+            priceData: { currency: 'TRY', price: String(amt), vatPercent: '0' },
+            stockQuantity: 1,
+            customListing: true // dükkan/vitrinde normal bir ürün gibi görünmesin
+        });
+        const product = resp.data && (resp.data.data || resp.data);
+        if (!product || !product.id || !product.url) throw new Error('Shopier ürün yanıtı beklenmedik: ' + JSON.stringify(resp.data).slice(0, 300));
+
+        db.shopierPending[String(product.id)] = { username, amount: amt, createdAt: Date.now(), title };
+        persist();
+        res.json({ success: true, url: product.url, productId: product.id });
+    } catch (e) {
+        console.error('[shopier/create] hata:', e.response ? JSON.stringify(e.response.data).slice(0, 500) : e.message);
+        res.json({ success: false, message: "Shopier ödeme sayfası oluşturulamadı. Lütfen tekrar deneyin veya havale ile ödeyin." });
+    }
+});
+
+// ====== SHOPIER: bekleyen ödemeleri yoklama (polling) ile kontrol et ======
+// Webhook, PAT ile değil sadece OAuth2 "uygulama"larla çalıştığı için bunun yerine güvenli bir yöntem:
+// kendi PAT'imizle Shopier'e "bu sipariş ödendi mi" diye SORUYORUZ (dışarıdan gelen hiçbir isteğe
+// güvenmiyoruz, bu yüzden sahte "ödeme yapıldı" bildirimi göndermek mümkün değil - güvenlik burada).
+const SHOPIER_PENDING_TIMEOUT_MS = 30 * 60 * 1000; // 30 dakika içinde ödenmezse ürün iptal edilir
+async function pollShopierPending() {
+    const pendingIds = Object.keys(db.shopierPending || {});
+    if (!pendingIds.length || !SHOPIER_PAT) return;
+    for (const productId of pendingIds) {
+        const pend = db.shopierPending[productId];
+        if (!pend) continue;
+        try {
+            // Süresi dolmuş, hâlâ ödenmemiş bekleyen kayıtları temizle (Shopier'deki ürünü de sil).
+            if (Date.now() - pend.createdAt > SHOPIER_PENDING_TIMEOUT_MS) {
+                delete db.shopierPending[productId];
+                persist();
+                try { await shopierRequest('delete', '/products/' + productId); } catch (e2) {}
+                continue;
+            }
+            // Siparişleri, bu ürünün oluşturulma zamanından itibaren listele ve ödenmiş + bu ürüne ait olanı ara.
+            const dateStart = new Date(pend.createdAt - 5 * 60 * 1000).toISOString();
+            const resp = await shopierRequest('get', '/orders?limit=50&sort=dateDesc&dateStart=' + encodeURIComponent(dateStart));
+            const orders = (resp.data && (resp.data.data || resp.data.orders || resp.data)) || [];
+            const list = Array.isArray(orders) ? orders : [];
+            for (const order of list) {
+                if (!order || order.paymentStatus !== 'paid') continue;
+                const orderId = String(order.id || order.orderId || '');
+                if (!orderId || db.shopierProcessedOrders[orderId]) continue;
+                // Bu siparişin ürünlerinden biri bizim oluşturduğumuz productId mi? (alan adı sağlayıcıdan
+                // sağlayıcıya değişebildiği için birkaç olası alanı sırayla deniyoruz.)
+                const items = order.products || order.items || order.lineItems || order.orderItems || [];
+                const matches = Array.isArray(items) && items.some(it => String(it && (it.id || it.productId)) === String(productId));
+                if (!matches) continue;
+
+                db.shopierProcessedOrders[orderId] = true;
+                db.users[pend.username].balance += pend.amount;
+                const payId = 'shopier_' + orderId;
+                db.payments[payId] = { id: payId, username: pend.username, senderName: 'Shopier', amount: pend.amount, status: 'approved', method: 'shopier', time: new Date().toLocaleString('tr-TR'), ts: Date.now() };
+                delete db.shopierPending[productId];
+                persist();
+                try { await shopierRequest('delete', '/products/' + productId); } catch (e3) {}
+                await notifyAdminTelegram(`✅ Shopier ile otomatik ödeme!\nKullanıcı: ${pend.username}\nTutar: ${pend.amount} TL\nSipariş: ${orderId}`);
+                notifyAdminWhatsapp(`✅ Shopier ile otomatik ödeme!\nKullanıcı: ${pend.username}\nTutar: ${pend.amount} TL`);
+                break;
+            }
+        } catch (e) {
+            console.error('[pollShopierPending] hata (ürün ' + productId + '):', e.response ? JSON.stringify(e.response.data).slice(0, 300) : e.message);
+        }
+    }
+}
+setInterval(() => { pollShopierPending().catch(() => {}); }, 20000);
+
+// ====== ADMIN: Shopier'i aç/kapa ======
+app.post('/api/admin/setShopierEnabled', (req, res) => {
+    const { enabled } = req.body;
+    db.shopierEnabled = !!enabled;
+    persist();
+    res.json({ success: true, shopierEnabled: db.shopierEnabled });
+});
+
 // ====== ADMIN: her şeyi tek seferde getir ======
 app.get('/api/admin/getData', (req, res) => {
     const { adminToken } = req.query;
@@ -957,7 +1083,7 @@ app.get('/api/admin/getData', (req, res) => {
     const smmOrders = Object.values(db.smmOrders).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 100);
     const smmConfig = SMM_CATALOG.map(c => Object.assign({ id: c.id, name: c.name }, db.smmConfig[c.id] || {}));
 
-    res.json({ success: true, users, payments, orders, supportChats, catalog: catalogList, smmOrders, smmConfig, otherPlatformsMarkup: (db.otherPlatformsMarkup && db.otherPlatformsMarkup.multiplier) || 1.8 });
+    res.json({ success: true, users, payments, orders, supportChats, catalog: catalogList, smmOrders, smmConfig, otherPlatformsMarkup: (db.otherPlatformsMarkup && db.otherPlatformsMarkup.multiplier) || 1.8, shopierEnabled: !!db.shopierEnabled, shopierConfigured: !!SHOPIER_PAT });
 });
 
 app.post('/api/admin/processPayment', (req, res) => {
@@ -1799,7 +1925,16 @@ app.get('/', (req, res) => {
         <div id="depositModal" class="fixed inset-0 bg-black/85 flex items-center justify-center hidden z-50" onclick="if(event.target===this) closeDeposit()">
             <div class="glassCard p-8 rounded-3xl w-full max-w-md relative shadow-2xl" onclick="event.stopPropagation()">
                 <button onclick="closeDeposit()" class="absolute top-4 right-4 text-slate-400 hover:text-white" style="z-index:5"><i class="fa-solid fa-xmark text-xl"></i></button>
-                <h2 class="text-xl font-black mb-4 text-violet-400"><i class="fa-solid fa-wallet"></i> Bakiye Yükle (IBAN)</h2>
+                <h2 class="text-xl font-black mb-4 text-violet-400"><i class="fa-solid fa-wallet"></i> Bakiye Yükle</h2>
+                <div id="shopierSection" class="hidden mb-5">
+                    <div class="flex items-center gap-2 mb-2">
+                        <p class="text-sm font-bold text-white">Kartla Öde (Shopier)</p>
+                        <span class="bg-violet-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">ÖNERİLEN</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-3">Kart bilgisi bize gelmez, Shopier'in güvenli sayfasında ödersin - bakiyen anında yüklenir.</p>
+                    <div id="shopierPackages" class="grid grid-cols-3 gap-2"></div>
+                    <div class="flex items-center gap-3 my-5"><div class="flex-1 h-px bg-violet-500/20"></div><span class="text-xs text-slate-500">veya havale/EFT</span><div class="flex-1 h-px bg-violet-500/20"></div></div>
+                </div>
                 <div class="space-y-4 text-sm text-slate-300">
                     <div class="bg-black/40 p-4 rounded-xl border border-violet-500/20">
                         <p class="text-slate-500 text-xs">Banka IBAN:</p>
