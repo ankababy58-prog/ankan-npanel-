@@ -10,7 +10,7 @@ app.use(bodyParser.json());
 
 // Her yeni dosya teslim edildiğinde bu tarihi değiştiriyoruz. Sitenin en altında küçük yazıyla görünür -
 // Render'a yüklediğin sürümün gerçekten güncellenip güncellenmediğini buradan kontrol edebilirsin.
-const APP_VERSION = '2026-11-06-20';
+const APP_VERSION = '2026-11-07-21';
 
 // ====== AYARLAR (Render > Environment bölümünden de girilebilir) ======
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9264065416:AAHZqKF6BhGS9cPRiigEfJSHp3bOC8j01kw';
@@ -339,7 +339,7 @@ const CATALOG = [
     { id: 'tg_anonim', randomPool: ['co', 'us', 'gb', 'ph'], name: 'Telegram Anonim (Rastgele Ülke)', serviceCode: 'tg', defCountry: '10', price: 300, icon: 'fa-shuffle', iconSet: 'fa-solid', bg: 'bg-blue-500/10', color: 'text-blue-400', featured: true, dynamicPricing: true, flatMargin: 150 },
     { id: 'pazarama_tr', key: 'tr', name: 'Pazarama Türkiye', defCountry: '62', price: 300, serviceHints: ['pazarama'], guessCodes: [], icon: 'fa-store', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true, flatMargin: 150 },
     { id: 'sahibinden_tr', key: 'tr', name: 'Sahibinden Türkiye', defCountry: '62', price: 200, serviceHints: ['sahibinden'], guessCodes: [], icon: 'fa-shop', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true, flatMargin: 150 },
-    { id: 'dolap_tr', key: 'tr', name: 'Dolap Türkiye', defCountry: '62', price: 350, serviceHints: ['dolap'], guessCodes: [], icon: 'fa-shirt', iconSet: 'fa-solid', bg: 'bg-pink-500/10', color: 'text-pink-400', dynamicPricing: true, flatMargin: 150 },
+    { id: 'dolap_tr', key: 'tr', name: 'Dolap Türkiye', defCountry: '62', price: 100, serviceHints: ['dolap'], guessCodes: [], icon: 'fa-shirt', iconSet: 'fa-solid', bg: 'bg-pink-500/10', color: 'text-pink-400' },
     { id: 'letgo_tr', key: 'tr', name: 'Letgo Türkiye', defCountry: '62', price: 250, serviceHints: ['letgo'], guessCodes: [], icon: 'fa-tag', iconSet: 'fa-solid', bg: 'bg-orange-500/10', color: 'text-orange-300', dynamicPricing: true, flatMargin: 150 },
     { id: 'uber_tr', key: 'tr', name: 'Uber Türkiye', defCountry: '62', price: 200, serviceHints: ['uber'], guessCodes: ['ub'], icon: 'fa-uber', iconSet: 'fa-brands', bg: 'bg-slate-500/10', color: 'text-slate-200' },
     { id: 'paycell_tr', key: 'tr', name: 'Paycell Türkiye', defCountry: '62', price: 250, serviceHints: ['paycell'], guessCodes: [], icon: 'fa-credit-card', iconSet: 'fa-solid', bg: 'bg-amber-500/10', color: 'text-amber-300', dynamicPricing: true, flatMargin: 150 },
@@ -1061,7 +1061,8 @@ setInterval(() => { pollShopierPending().catch(() => {}); }, 20000);
 
 // ====== ADMIN: Shopier'i aç/kapa ======
 app.post('/api/admin/setShopierEnabled', (req, res) => {
-    const { enabled } = req.body;
+    const { adminToken, enabled } = req.body;
+    if (!checkAdminToken(adminToken)) return res.status(403).json({ success: false, message: "Yetkisiz." });
     db.shopierEnabled = !!enabled;
     persist();
     res.json({ success: true, shopierEnabled: db.shopierEnabled });
@@ -1957,8 +1958,11 @@ app.get('/', (req, res) => {
             var isRegisterMode = false;
             var orderTimers = {};
 
+            var paymentConfig = { shopierEnabled: false, shopierPackages: [300, 400, 500, 1000, 1500] };
+
             function init() {
                 updateUserArea();
+                loadPaymentConfig();
                 if (currentUser) {
                     buildMain();
                     loadServices();
@@ -1966,6 +1970,44 @@ app.get('/', (req, res) => {
                     loadManualServices();
                     restoreOrders();
                     loadRecentOrders();
+                }
+            }
+
+            async function loadPaymentConfig() {
+                try {
+                    var res = await fetch('/api/paymentConfig');
+                    var data = await res.json();
+                    if (data && data.success) {
+                        paymentConfig.shopierEnabled = !!data.shopierEnabled;
+                        paymentConfig.shopierPackages = data.shopierPackages || paymentConfig.shopierPackages;
+                    }
+                } catch (e) {}
+                renderShopierSection();
+            }
+
+            function renderShopierSection() {
+                var sec = document.getElementById('shopierSection');
+                var box = document.getElementById('shopierPackages');
+                if (!sec || !box) return;
+                if (!paymentConfig.shopierEnabled) { sec.classList.add('hidden'); return; }
+                sec.classList.remove('hidden');
+                box.innerHTML = paymentConfig.shopierPackages.map(function (amt) {
+                    return '<button onclick="shopierPay(' + amt + ')" class="bg-black/40 hover:bg-violet-600 border border-violet-500/30 text-white font-bold py-3 rounded-xl text-sm transition">' + amt + ' TL</button>';
+                }).join('');
+            }
+
+            async function shopierPay(amount) {
+                if (!currentUser) { alert('Önce giriş yapmalısın.'); return; }
+                try {
+                    var res = await fetch('/api/shopier/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser, amount: amount }) });
+                    var data = await res.json();
+                    if (data && data.success && data.url) {
+                        window.location.href = data.url;
+                    } else {
+                        alert((data && data.message) || 'Shopier ödeme sayfası açılamadı.');
+                    }
+                } catch (e) {
+                    alert('Shopier ödeme sayfası açılamadı. Lütfen tekrar deneyin.');
                 }
             }
 
@@ -2215,7 +2257,7 @@ app.get('/', (req, res) => {
                 setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 4100);
             }
 
-            function openDeposit() { document.getElementById('depositModal').classList.remove('hidden'); }
+            function openDeposit() { document.getElementById('depositModal').classList.remove('hidden'); renderShopierSection(); }
             function closeDeposit() { document.getElementById('depositModal').classList.add('hidden'); }
 
             async function loadServices() {
@@ -2624,6 +2666,12 @@ app.get('/', (req, res) => {
                             '</div>';
                     }).join('') + '</div>';
 
+                var shopierAdminHtml = '<div class="bg-black/30 p-3 rounded-xl flex flex-wrap items-center gap-3">' +
+                    '<span class="text-sm">Durum: <strong class="' + (data.shopierEnabled ? 'text-violet-400' : 'text-slate-500') + '">' + (data.shopierEnabled ? 'AÇIK' : 'KAPALI') + '</strong></span>' +
+                    '<button onclick="toggleShopier(' + (!data.shopierEnabled) + ')" class="' + (data.shopierEnabled ? 'bg-red-700 hover:bg-red-600' : 'bg-violet-600 hover:bg-violet-500') + ' px-4 py-2 rounded-xl text-xs font-bold">' + (data.shopierEnabled ? 'Kapat' : 'Aç') + '</button>' +
+                    '<span class="text-xs ' + (data.shopierConfigured ? 'text-violet-400' : 'text-red-400') + '">' + (data.shopierConfigured ? 'SHOPIER_PAT tanımlı ✓' : 'SHOPIER_PAT tanımlı değil! Render\\'da env değişkeni ekle.') + '</span>' +
+                    '</div>';
+
                 var smmOrdersHtml = '<div class="max-h-56 overflow-y-auto space-y-1">' + (data.smmOrders || []).map(function (o) {
                     return '<div class="bg-black/30 px-3 py-2 rounded-lg text-xs flex flex-wrap justify-between items-center gap-2"><span class="font-bold text-white">' + o.username + '</span><span>' + o.itemName + ' x' + o.quantity + '</span><span class="text-pink-300">' + o.price.toFixed(2) + ' TL</span><span id="smmStatus_' + o.id + '" class="text-slate-400">' + o.status + '</span><span class="text-slate-500">' + o.time + '</span><button onclick="refreshSmmStatus(\\'' + o.id + '\\')" class="bg-blue-600 px-2 py-1 rounded text-xs font-bold">Durumu Yenile</button></div>';
                 }).join('') + '</div>';
@@ -2634,6 +2682,7 @@ app.get('/', (req, res) => {
                     '<div class="flex justify-between items-center"><h2 class="text-xl font-bold text-violet-400">Admin Paneli</h2><button onclick="location.reload();" class="bg-black/40 border border-violet-500/30 px-4 py-2 rounded-xl text-xs font-bold">Geri Dön</button></div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-money-bill-wave mr-1"></i> Bekleyen Ödemeler</h3>' + pendingHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-receipt mr-1"></i> Tüm Ödemeler (kim ödeme yapmış)</h3>' + allPayHtml + '</div>' +
+                    '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-brands fa-cc-visa mr-1"></i> Shopier Kartlı Ödeme</h3>' + shopierAdminHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-users mr-1"></i> Kayıtlı Kullanıcılar</h3>' + usersHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-sim-card mr-1"></i> Son Siparişler</h3>' + ordersHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-headset mr-1"></i> Destek Sohbetleri</h3>' + supportHtml + '</div>' +
@@ -2752,6 +2801,12 @@ app.get('/', (req, res) => {
                 openAdminPanel();
             }
 
+            async function toggleShopier(enabled) {
+                var r = await fetch('/api/admin/setShopierEnabled', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ adminToken: adminToken, enabled: enabled }) });
+                var d = await r.json();
+                if (d.success) openAdminPanel();
+                else alert(d.message || 'İşlem başarısız.');
+            }
             async function addProductSubmit() {
                 var name = document.getElementById('npName').value.trim();
                 var price = document.getElementById('npPrice').value.trim();
