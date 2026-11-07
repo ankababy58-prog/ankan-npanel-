@@ -10,7 +10,7 @@ app.use(bodyParser.json());
 
 // Her yeni dosya teslim edildiğinde bu tarihi değiştiriyoruz. Sitenin en altında küçük yazıyla görünür -
 // Render'a yüklediğin sürümün gerçekten güncellenip güncellenmediğini buradan kontrol edebilirsin.
-const APP_VERSION = '2026-11-07-21';
+const APP_VERSION = '2026-11-07-22';
 
 // ====== AYARLAR (Render > Environment bölümünden de girilebilir) ======
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9264065416:AAHZqKF6BhGS9cPRiigEfJSHp3bOC8j01kw';
@@ -990,7 +990,7 @@ app.post('/api/shopier/create', async (req, res) => {
             title,
             description: 'Anka SMS panel bakiye yükleme - otomatik oluşturulmuş tek seferlik ödeme kaydı.',
             type: 'digital',
-            media: [],
+            media: ['https://placehold.co/400x400/6d28d9/ffffff?text=Anka+SMS'],
             priceData: { currency: 'TRY', price: String(amt), vatPercent: '0' },
             stockQuantity: 1,
             customListing: true // dükkan/vitrinde normal bir ürün gibi görünmesin
