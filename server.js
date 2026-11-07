@@ -7,10 +7,11 @@ const crypto = require('crypto');
 
 const app = express();
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true })); // bazı SMS yönlendirme uygulamaları form/urlencoded gönderir
 
 // Her yeni dosya teslim edildiğinde bu tarihi değiştiriyoruz. Sitenin en altında küçük yazıyla görünür -
 // Render'a yüklediğin sürümün gerçekten güncellenip güncellenmediğini buradan kontrol edebilirsin.
-const APP_VERSION = '2026-11-07-24';
+const APP_VERSION = '2026-11-07-25';
 
 // ====== AYARLAR (Render > Environment bölümünden de girilebilir) ======
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '9264065416:AAHZqKF6BhGS9cPRiigEfJSHp3bOC8j01kw';
@@ -19,6 +20,9 @@ const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '8811977430';
 // bildirimi hem eski ADMIN_CHAT_ID'ye hem buraya gider, onay/red butonları HER İKİSİNDEN de kullanılabilir.
 const ADMIN_CHAT_ID_2 = process.env.ADMIN_CHAT_ID_2 || '8935662812';
 const ADMIN_CHAT_IDS = Array.from(new Set([ADMIN_CHAT_ID, ADMIN_CHAT_ID_2].filter(Boolean)));
+// Otomatik havale (SMS yönlendirme) webhook'unun şifresi - telefonundaki SMS yönlendirme uygulamasına bu
+// anahtarı girmezsen webhook'u kimse çalıştıramaz, rastgele biri sahte "para geldi" isteği atamaz.
+const BANK_SMS_WEBHOOK_SECRET = process.env.BANK_SMS_WEBHOOK_SECRET || '';
 // Admin'e Telegram bildirimi gönderir - ADMIN_CHAT_IDS listesindeki TÜM sohbetlere aynı anda yollar.
 async function notifyAdminTelegram(text, extra) {
     for (const chatId of ADMIN_CHAT_IDS) {
@@ -174,7 +178,8 @@ const DEFAULT_DB = {
     // Shopier admin panelden açılıp kapatılabilir - test edilip onaylanana kadar varsayılan KAPALI.
     shopierEnabled: false,
     shopierPending: {}, // productId -> {username, amount, createdAt, title}
-    shopierProcessedOrders: {} // orderId -> true (aynı siparişten iki kere bakiye yüklenmesini engellemek için)
+    shopierProcessedOrders: {}, // orderId -> true (aynı siparişten iki kere bakiye yüklenmesini engellemek için)
+    bankSmsLog: [] // son gelen banka SMS'lerinin kaydı (admin panelde teşhis için) - {time, text, matched, paymentId}
 };
 
 // ====== KALICI KAYIT (dosyaya yazma) ======
@@ -970,6 +975,68 @@ app.post('/api/deposit/notify', async (req, res) => {
     res.json({ success: true, message: "Ödeme bildiriminiz alındı. İnceleniyor." });
 });
 
+// ====== OTOMATİK HAVALE: telefonundaki SMS yönlendirme uygulaması banka SMS'i geldiğinde buraya POST atar ======
+// Güvenlik: BANK_SMS_WEBHOOK_SECRET tanımlı değilse bu webhook tamamen kapalıdır (kimse tetikleyemez).
+// Eşleştirme mantığı: SMS metninden tutarı (TL) ayıklar, bekleyen (pending) ödeme bildirimlerinden aynı
+// tutarda TEK bir tane varsa otomatik onaylar ve bakiyeyi yükler. Aynı tutarda birden fazla bekleyen
+// bildirim varsa (ör. iki müşteri aynı anda 100 TL bildirmiş) kafa karışıklığını önlemek için OTOMATİK
+// ONAYLAMAZ - admin'e "eşleşme belirsiz, elden onayla" diye bildirim gider, panelden elle onaylanır.
+function extractTryAmountFromSms(text) {
+    if (!text) return null;
+    // "1.234,56 TL", "1234,56TL", "1234.56 TRY", "1234 TL" gibi yaygın banka SMS formatlarını yakalar.
+    const m = text.match(/([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)\s*(?:TL|TRY)\b/i);
+    if (!m) return null;
+    let raw = m[1];
+    // Binlik ayraç + ondalık ayracı Türkçe formattan (1.234,56) sayıya çevir.
+    if (raw.includes(',') && raw.includes('.')) {
+        raw = raw.replace(/\./g, '').replace(',', '.');
+    } else if (raw.includes(',')) {
+        raw = raw.replace(',', '.');
+    }
+    const n = parseFloat(raw);
+    return isNaN(n) ? null : n;
+}
+app.post('/api/webhook/bankSms', (req, res) => {
+    if (!BANK_SMS_WEBHOOK_SECRET) return res.status(403).json({ success: false, message: "Bu webhook ayarlanmadı (BANK_SMS_WEBHOOK_SECRET eksik)." });
+    const providedSecret = req.query.secret || req.body.secret || req.headers['x-webhook-secret'];
+    if (providedSecret !== BANK_SMS_WEBHOOK_SECRET) return res.status(403).json({ success: false, message: "Geçersiz anahtar." });
+
+    const text = req.body.text || req.body.message || req.body.sms || req.body.body || req.body.content || '';
+    const amount = extractTryAmountFromSms(text);
+    const logEntry = { time: new Date().toLocaleString('tr-TR'), text: String(text).slice(0, 300), matched: false, paymentId: null };
+
+    if (amount == null) {
+        logEntry.note = 'SMS metninde TL tutarı bulunamadı.';
+        db.bankSmsLog.unshift(logEntry);
+        db.bankSmsLog = db.bankSmsLog.slice(0, 50);
+        persist();
+        return res.json({ success: true, matched: false, message: "Tutar bulunamadı, kaydedildi." });
+    }
+
+    const candidates = Object.values(db.payments).filter(p => p.status === 'pending' && !p.method && Math.abs(p.amount - amount) < 0.5);
+    if (candidates.length === 1) {
+        const payment = candidates[0];
+        payment.status = 'approved';
+        payment.method = 'bank_auto';
+        if (db.users[payment.username]) db.users[payment.username].balance += payment.amount;
+        logEntry.matched = true;
+        logEntry.paymentId = payment.id;
+        db.bankSmsLog.unshift(logEntry);
+        db.bankSmsLog = db.bankSmsLog.slice(0, 50);
+        persist();
+        notifyAdminTelegram(`✅ Otomatik havale onaylandı!\nKullanıcı: ${payment.username}\nTutar: ${payment.amount} TL\n(SMS: "${String(text).slice(0, 120)}")`);
+        notifyAdminWhatsapp(`✅ Otomatik havale onaylandı!\nKullanıcı: ${payment.username}\nTutar: ${payment.amount} TL`);
+        return res.json({ success: true, matched: true, username: payment.username, amount: payment.amount });
+    }
+
+    logEntry.note = candidates.length === 0 ? 'Bu tutarda bekleyen ödeme bulunamadı.' : 'Bu tutarda birden fazla bekleyen ödeme var, belirsiz - elden onaylanmalı.';
+    db.bankSmsLog.unshift(logEntry);
+    db.bankSmsLog = db.bankSmsLog.slice(0, 50);
+    persist();
+    notifyAdminTelegram(`⚠️ Banka SMS'i geldi ama otomatik eşleştirilemedi (${logEntry.note})\nTutar: ${amount} TL\nSMS: "${String(text).slice(0, 150)}"\nLütfen panelden elden kontrol et.`);
+    res.json({ success: true, matched: false, message: logEntry.note });
+});
+
 // ====== SHOPIER: ödeme başlat ======
 // Müşteri "300/400/500/1000/1500 TL Shopier ile yükle" dediğinde çağrılır. Arka planda Shopier'de o tutarda
 // TEK SEFERLİK (stockQuantity:1), görünmez bir "dijital ürün" oluşturulur - müşteri bunu hiç ürün olarak
@@ -1084,7 +1151,7 @@ app.get('/api/admin/getData', (req, res) => {
     const smmOrders = Object.values(db.smmOrders).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 100);
     const smmConfig = SMM_CATALOG.map(c => Object.assign({ id: c.id, name: c.name }, db.smmConfig[c.id] || {}));
 
-    res.json({ success: true, users, payments, orders, supportChats, catalog: catalogList, smmOrders, smmConfig, otherPlatformsMarkup: (db.otherPlatformsMarkup && db.otherPlatformsMarkup.multiplier) || 1.8, shopierEnabled: !!db.shopierEnabled, shopierConfigured: !!SHOPIER_PAT });
+    res.json({ success: true, users, payments, orders, supportChats, catalog: catalogList, smmOrders, smmConfig, otherPlatformsMarkup: (db.otherPlatformsMarkup && db.otherPlatformsMarkup.multiplier) || 1.8, shopierEnabled: !!db.shopierEnabled, shopierConfigured: !!SHOPIER_PAT, bankSmsConfigured: !!BANK_SMS_WEBHOOK_SECRET, bankSmsLog: (db.bankSmsLog || []).slice(0, 10) });
 });
 
 app.post('/api/admin/processPayment', (req, res) => {
@@ -2672,6 +2739,12 @@ app.get('/', (req, res) => {
                     '<span class="text-xs ' + (data.shopierConfigured ? 'text-violet-400' : 'text-red-400') + '">' + (data.shopierConfigured ? 'SHOPIER_PAT tanımlı ✓' : 'SHOPIER_PAT tanımlı değil! Render\\'da env değişkeni ekle.') + '</span>' +
                     '</div>';
 
+                var bankSmsAdminHtml = '<div class="bg-black/30 p-3 rounded-xl space-y-2">' +
+                    '<span class="text-xs ' + (data.bankSmsConfigured ? 'text-violet-400' : 'text-amber-400') + '">' + (data.bankSmsConfigured ? 'Webhook anahtarı tanımlı ✓ - telefonundaki SMS yönlendirme uygulaması bu adrese POST atmalı: /api/webhook/bankSms?secret=... ' : 'BANK_SMS_WEBHOOK_SECRET tanımlı değil, webhook kapalı.') + '</span>' +
+                    '<div class="max-h-40 overflow-y-auto space-y-1">' + (data.bankSmsLog && data.bankSmsLog.length ? data.bankSmsLog.map(function (l) {
+                        return '<div class="bg-black/30 px-3 py-2 rounded-lg text-xs"><span class="' + (l.matched ? 'text-violet-400' : 'text-amber-400') + ' font-bold">' + (l.matched ? 'EŞLEŞTİ' : 'EŞLEŞMEDİ') + '</span> <span class="text-slate-500">' + l.time + '</span><div class="text-slate-400">' + (l.text || '').replace(/</g, '&lt;') + '</div>' + (l.note ? '<div class="text-slate-500">' + l.note + '</div>' : '') + '</div>';
+                    }).join('') : '<p class="text-sm text-slate-500">Henüz SMS gelmedi.</p>') + '</div></div>';
+
                 var smmOrdersHtml = '<div class="max-h-56 overflow-y-auto space-y-1">' + (data.smmOrders || []).map(function (o) {
                     return '<div class="bg-black/30 px-3 py-2 rounded-lg text-xs flex flex-wrap justify-between items-center gap-2"><span class="font-bold text-white">' + o.username + '</span><span>' + o.itemName + ' x' + o.quantity + '</span><span class="text-pink-300">' + o.price.toFixed(2) + ' TL</span><span id="smmStatus_' + o.id + '" class="text-slate-400">' + o.status + '</span><span class="text-slate-500">' + o.time + '</span><button onclick="refreshSmmStatus(\\'' + o.id + '\\')" class="bg-blue-600 px-2 py-1 rounded text-xs font-bold">Durumu Yenile</button></div>';
                 }).join('') + '</div>';
@@ -2683,6 +2756,7 @@ app.get('/', (req, res) => {
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-money-bill-wave mr-1"></i> Bekleyen Ödemeler</h3>' + pendingHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-receipt mr-1"></i> Tüm Ödemeler (kim ödeme yapmış)</h3>' + allPayHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-brands fa-cc-visa mr-1"></i> Shopier Kartlı Ödeme</h3>' + shopierAdminHtml + '</div>' +
+                    '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-mobile-screen mr-1"></i> Otomatik Havale (SMS Yönlendirme)</h3>' + bankSmsAdminHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-users mr-1"></i> Kayıtlı Kullanıcılar</h3>' + usersHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-sim-card mr-1"></i> Son Siparişler</h3>' + ordersHtml + '</div>' +
                     '<div><h3 class="font-bold mb-2 text-violet-300"><i class="fa-solid fa-headset mr-1"></i> Destek Sohbetleri</h3>' + supportHtml + '</div>' +
